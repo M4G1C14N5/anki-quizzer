@@ -9,9 +9,12 @@
 // Endpoints:
 //   GET  /api/health              -> { ok, ankiUrl, ankiReachable, ankiVersion }
 //   GET  /api/decks               -> [ "Default", "Docker", ... ]
-//   POST /api/quiz {deck, count}  -> { deck, count, cards:[{id, front, back, tags, interval, ease}] }
-//   POST /api/finish {deck, results:[{id, rating}]}
-//        -> schedules via setDueDate / adjustEase, returns { saved:true, scheduled:n }
+//   POST /api/quiz {deck, count, mode} -> { deck, count, mode, cards:[...] }
+//        mode: "recall" (default) -> cards: [{id, front, back, tags, interval, ease}]
+//        mode: "mc"      -> cards: [{id, front, back, options:[{label, text, isCorrect}], ...}]
+//   POST /api/finish {deck, count, mode, results:[{id, rating?} | {id, correct}]}
+//        -> schedules via setDueDate / setEaseFactors, returns { saved:true, scheduled:n }
+//        For MC mode, results use {id, correct: true|false} which maps to good/again.
 //   GET  /api/last-results        -> last-results.json contents
 //   GET  /                        -> static public/index.html
 
@@ -158,6 +161,7 @@ app.post('/api/quiz', async (req, res, next) => {
   try {
     const deck = (req.body && req.body.deck) || 'All';
     const count = Math.max(1, Math.min(50, parseInt(req.body && req.body.count, 10) || 10));
+    const mode = (req.body && req.body.mode) === 'mc' ? 'mc' : 'recall';
 
     let cardIds;
     if (deck === 'All') {
@@ -167,43 +171,92 @@ app.post('/api/quiz', async (req, res, next) => {
     }
 
     if (!cardIds.length) {
-      return res.json({ deck, count, cards: [], message: 'No cards found in this deck.' });
+      return res.json({ deck, count, mode, cards: [], message: 'No cards found in this deck.' });
     }
 
-    // Shuffle and slice
+    // Shuffle and slice. In MC mode, fetch count + 3*count extra cards so we
+    // have enough backs to use as distractors (cap at total deck size).
     const shuffled = cardIds.slice().sort(() => Math.random() - 0.5);
-    const picked = shuffled.slice(0, count);
+    const poolSize = mode === 'mc' ? Math.min(cardIds.length, count * 4) : count;
+    const pool = shuffled.slice(0, poolSize);
+    const picked = mode === 'mc' ? pool.slice(0, count) : pool;
 
     // getCards → ['1494727644693', ...]
     // cardsInfo → [{ cardId, fields, interval, ease, ... }]
-    const info = await anki('cardsInfo', { cards: picked });
+    const info = await anki('cardsInfo', { cards: pool });
 
-    const cards = info
-      .filter((c) => c && c.fields)
-      .map((c) => {
-        // Pull the first non-empty field as "front", second as "back" if present.
-        const fieldNames = Object.keys(c.fields || {});
-        const frontField = fieldNames[0];
-        const backField = fieldNames[1] || fieldNames[0];
-        return {
-          id: c.cardId,
-          front: stripHtml(c.fields[frontField]?.value || ''),
-          back: stripHtml(c.fields[backField]?.value || ''),
-          tags: c.tags || [],
-          interval: c.interval || 0,
-          ease: c.ease || 0,
-          deckName: c.deckName || deck,
-          fieldNames,
-        };
+    // Index pool by cardId so we can pull distractors from non-question cards.
+    const poolById = new Map();
+    for (const c of info) {
+      if (!c || !c.fields) continue;
+      const fieldNames = Object.keys(c.fields || {});
+      const frontField = fieldNames[0];
+      const backField = fieldNames[1] || fieldNames[0];
+      poolById.set(c.cardId, {
+        id: c.cardId,
+        front: stripHtml(c.fields[frontField]?.value || ''),
+        back: stripHtml(c.fields[backField]?.value || ''),
+        tags: c.tags || [],
+        interval: c.interval || 0,
+        ease: c.ease || 0,
+        deckName: c.deckName || deck,
+        fieldNames,
       });
+    }
 
-    res.json({ deck, count, cards });
+    // For MC, we need a pool of distractor candidates drawn from OTHER cards'
+    // backs in the deck pool. Use any card not equal to the current question.
+    let distractorPool = [];
+    if (mode === 'mc') {
+      distractorPool = Array.from(poolById.values()).filter((c) => c.back && c.back.trim());
+    }
+
+    const cards = picked.map((cardRef) => {
+      const cardId = typeof cardRef === 'object' ? cardRef.cardId : cardRef;
+      const c = poolById.get(cardId);
+      if (!c) return null;
+
+      if (mode !== 'mc') return c;
+
+      // MC mode: build 3 distractors from other cards' backs.
+      const distractors = [];
+      const used = new Set([cardId]);
+      // Fisher-Yates on distractorPool, skip used ids.
+      const candidates = distractorPool.slice();
+      for (let i = candidates.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+      }
+      for (const cand of candidates) {
+        if (distractors.length >= 3) break;
+        if (used.has(cand.id)) continue;
+        if (!cand.back || cand.back.trim() === c.back.trim()) continue;
+        distractors.push(cand.back);
+        used.add(cand.id);
+      }
+
+      // If we couldn't get 3 unique distractors (tiny deck), pad with placeholders.
+      while (distractors.length < 3) {
+        distractors.push(`(no distractor available ${distractors.length + 1})`);
+      }
+
+      const options = [
+        { label: 'A', text: c.back, isCorrect: true },
+        { label: 'B', text: distractors[0], isCorrect: false },
+        { label: 'C', text: distractors[1], isCorrect: false },
+        { label: 'D', text: distractors[2], isCorrect: false },
+      ].sort(() => Math.random() - 0.5);
+
+      return { ...c, options };
+    }).filter(Boolean);
+
+    res.json({ deck, count, mode, cards });
   } catch (e) { next(e); }
 });
 
 app.post('/api/finish', async (req, res, next) => {
   try {
-    const { deck, count, results } = req.body || {};
+    const { deck, count, mode, results } = req.body || {};
     if (!Array.isArray(results) || !results.length) {
       return res.status(400).json({ error: 'results must be a non-empty array' });
     }
@@ -211,12 +264,23 @@ app.post('/api/finish', async (req, res, next) => {
     let scheduled = 0;
     const failures = [];
 
+    // For MC mode, each result has {id, correct: bool} → map to rating.
+    // For recall mode, each result has {id, rating}.
+    function ratingForResult(r) {
+      if (mode === 'mc') {
+        if (typeof r.correct === 'boolean') return r.correct ? 'good' : 'again';
+        return null;
+      }
+      const rating = String(r.rating || '').toLowerCase();
+      return RATINGS[rating] ? rating : null;
+    }
+
     // Group by (days) bucket so we can batch setDueDate calls per unique value.
     const byDays = new Map(); // days-string -> [cardId]
     const easeDeltas = []; // {id, delta} for cards that need ease adjustment
     for (const r of results) {
-      const rating = String(r.rating || '').toLowerCase();
-      if (!RATINGS[rating]) continue;
+      const rating = ratingForResult(r);
+      if (!rating) continue;
       const sched = scheduleForRating(rating);
       if (!sched) continue;
       if (!byDays.has(sched.days)) byDays.set(sched.days, []);
@@ -258,15 +322,21 @@ app.post('/api/finish', async (req, res, next) => {
     const summary = {
       finishedAt: new Date().toISOString(),
       deck: deck || 'All',
+      mode: mode === 'mc' ? 'mc' : 'recall',
       requested: count || results.length,
       answered: results.length,
       byRating: results.reduce((acc, r) => {
-        const k = String(r.rating || 'unknown').toLowerCase();
+        const k = mode === 'mc'
+          ? (r.correct ? 'correct' : 'incorrect')
+          : String(r.rating || 'unknown').toLowerCase();
         acc[k] = (acc[k] || 0) + 1;
         return acc;
       }, {}),
       score: Math.round(
-        (results.filter((r) => ['good', 'easy'].includes(String(r.rating).toLowerCase())).length /
+        (results.filter((r) => mode === 'mc'
+          ? r.correct === true
+          : ['good', 'easy'].includes(String(r.rating).toLowerCase())
+        ).length /
           results.length) *
           100,
       ),

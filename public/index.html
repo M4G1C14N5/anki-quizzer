@@ -32,6 +32,24 @@
       <output id="count-value">10</output>
     </div>
 
+    <h2>Quiz mode</h2>
+    <div class="mode-row">
+      <label class="mode-option">
+        <input type="radio" name="quiz-mode" value="recall" checked>
+        <span class="mode-card">
+          <strong>Recall</strong>
+          <span class="mode-desc">Type the answer in your head, then reveal and rate.</span>
+        </span>
+      </label>
+      <label class="mode-option">
+        <input type="radio" name="quiz-mode" value="mc">
+        <span class="mode-card">
+          <strong>Multiple Choice</strong>
+          <span class="mode-desc">Pick A / B / C / D. Get instant feedback.</span>
+        </span>
+      </label>
+    </div>
+
     <div class="actions">
       <button id="start-btn" class="primary" disabled>Start quiz</button>
     </div>
@@ -60,6 +78,10 @@
       <button id="show-answer" class="primary">Show answer</button>
     </div>
 
+    <div class="mc-options hidden" id="mc-options"></div>
+
+    <div class="mc-feedback hidden" id="mc-feedback"></div>
+
     <div class="actions hidden" id="rate-actions">
       <button class="rate again" data-rating="again"><span class="num">1</span><span class="label">Again</span></button>
       <button class="rate hard" data-rating="hard"><span class="num">2</span><span class="label">Hard</span></button>
@@ -67,8 +89,11 @@
       <button class="rate easy" data-rating="easy"><span class="num">4</span><span class="label">Easy</span></button>
     </div>
 
-    <div class="hotkeys muted small">
+    <div class="hotkeys muted small" id="hotkeys-recall">
       Hotkeys: <kbd>Space</kbd> reveal · <kbd>1</kbd> again · <kbd>2</kbd> hard · <kbd>3</kbd> good · <kbd>4</kbd> easy
+    </div>
+    <div class="hotkeys muted small hidden" id="hotkeys-mc">
+      Hotkeys: <kbd>A</kbd> <kbd>B</kbd> <kbd>C</kbd> <kbd>D</kbd> to pick an option
     </div>
   </section>
 

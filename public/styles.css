@@ -140,6 +140,99 @@ button.ghost { background: transparent; }
 .rate.easy  { border-left-color: var(--easy); }
 .rate:hover { background: var(--panel-2); }
 
+/* MC mode — segmented mode toggle on setup screen */
+.mode-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.mode-option { display: block; cursor: pointer; }
+.mode-option input { display: none; }
+.mode-card {
+  display: flex; flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.mode-option input:checked + .mode-card {
+  background: var(--panel-2);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.mode-option:hover .mode-card { border-color: var(--accent); }
+.mode-card strong { font-size: 1rem; }
+.mode-desc { font-size: 0.85rem; color: var(--muted); }
+
+/* MC mode — option buttons */
+.mc-options {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.mc-option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-align: left;
+  padding: 0.75rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.mc-option:hover:not(:disabled) { background: var(--panel-2); border-color: var(--accent); }
+.mc-option:disabled { cursor: default; }
+.mc-option .mc-letter {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  width: 1.75rem; height: 1.75rem;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-weight: 700;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+}
+.mc-option .mc-text { flex: 1; white-space: pre-wrap; }
+.mc-option.correct {
+  border-color: var(--good);
+  background: rgba(34, 197, 94, 0.08);
+}
+.mc-option.correct .mc-letter {
+  background: var(--good);
+  border-color: var(--good);
+  color: #000;
+}
+.mc-option.incorrect {
+  border-color: var(--again);
+  background: rgba(239, 68, 68, 0.08);
+}
+.mc-option.incorrect .mc-letter {
+  background: var(--again);
+  border-color: var(--again);
+  color: #fff;
+}
+.mc-option.dim { opacity: 0.45; }
+
+/* MC mode — feedback line */
+.mc-feedback {
+  margin-top: 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.mc-feedback.ok { border-color: var(--good); background: rgba(34, 197, 94, 0.08); }
+.mc-feedback.bad { border-color: var(--again); background: rgba(239, 68, 68, 0.08); }
+
 .hotkeys { margin-top: 1rem; text-align: center; }
 kbd {
   background: var(--panel-2);

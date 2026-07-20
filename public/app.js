@@ -13,9 +13,12 @@ const state = {
   decks: [],
   deck: null,
   count: 10,
+  mode: 'recall', // 'recall' | 'mc'
   cards: [],
   idx: 0,
   revealed: false,
+  mcAnswered: false, // MC mode: have we already picked an option for this card?
+  mcPicked: null,    // MC mode: which option the user clicked
   results: [],
 };
 
@@ -103,12 +106,30 @@ slider.addEventListener('input', () => {
 
 $('start-btn').addEventListener('click', startQuiz);
 
+for (const r of document.querySelectorAll('input[name="quiz-mode"]')) {
+  r.addEventListener('change', (e) => {
+    state.mode = e.target.value === 'mc' ? 'mc' : 'recall';
+  });
+}
+
 // --- Quiz flow ---------------------------------------------------------
 
 function showScreen(name) {
   for (const k of Object.keys(screens)) {
     screens[k].classList.toggle('active', k === name);
   }
+}
+
+function setModeUI() {
+  // Show/hide UI bits based on mode
+  const isMC = state.mode === 'mc';
+  $('show-answer').classList.toggle('hidden', isMC);
+  $('mc-options').classList.toggle('hidden', !isMC);
+  $('mc-feedback').classList.add('hidden'); // reset; shown after pick
+  // Rating buttons are ONLY for recall mode. MC mode uses correct/incorrect scoring.
+  $('rate-actions').classList.toggle('hidden', isMC);
+  $('hotkeys-recall').classList.toggle('hidden', isMC);
+  $('hotkeys-mc').classList.toggle('hidden', !isMC);
 }
 
 async function startQuiz() {
@@ -118,13 +139,15 @@ async function startQuiz() {
   state.idx = 0;
   state.results = [];
   state.revealed = false;
+  state.mcAnswered = false;
+  state.mcPicked = null;
 
   $('start-btn').disabled = true;
   $('start-btn').textContent = 'Loading cards…';
   try {
     const data = await api('/api/quiz', {
       method: 'POST',
-      body: JSON.stringify({ deck: state.deck, count: state.count }),
+      body: JSON.stringify({ deck: state.deck, count: state.count, mode: state.mode }),
     });
     state.cards = data.cards || [];
     if (!state.cards.length) {
@@ -154,9 +177,91 @@ function renderCard() {
   $('card-back').textContent = c.back || '(empty)';
   $('card-back').classList.add('hidden');
 
-  $('show-answer').classList.remove('hidden');
-  $('rate-actions').classList.add('hidden');
   state.revealed = false;
+  state.mcAnswered = false;
+  state.mcPicked = null;
+
+  setModeUI();
+
+  if (state.mode === 'mc') {
+    renderMCOptions(c);
+  }
+}
+
+function renderMCOptions(card) {
+  const container = $('mc-options');
+  container.innerHTML = '';
+  if (!Array.isArray(card.options) || card.options.length === 0) {
+    container.textContent = '(no options for this card)';
+    return;
+  }
+  for (const opt of card.options) {
+    const btn = document.createElement('button');
+    btn.className = 'mc-option';
+    btn.dataset.label = opt.label;
+    btn.dataset.correct = String(!!opt.isCorrect);
+    btn.innerHTML = `<span class="mc-letter">${escapeHtml(opt.label)}</span><span class="mc-text">${escapeHtml(opt.text)}</span>`;
+    btn.addEventListener('click', () => pickMCOption(btn, opt));
+    container.appendChild(btn);
+  }
+}
+
+function pickMCOption(btn, opt) {
+  if (state.mcAnswered) return;
+  state.mcAnswered = true;
+  state.mcPicked = opt;
+
+  // Mark all options: correct one green, picked-wrong one red, others dim.
+  const container = $('mc-options');
+  for (const b of container.querySelectorAll('.mc-option')) {
+    const isCorrect = b.dataset.correct === 'true';
+    b.disabled = true;
+    if (isCorrect) b.classList.add('correct');
+    else if (b === btn) b.classList.add('incorrect');
+    else b.classList.add('dim');
+  }
+
+  // Show feedback line.
+  const fb = $('mc-feedback');
+  if (opt.isCorrect) {
+    fb.className = 'mc-feedback ok';
+    fb.innerHTML = `✓ Correct!`;
+  } else {
+    const correctBtn = container.querySelector('.mc-option.correct');
+    const correctLabel = correctBtn ? correctBtn.dataset.label : '?';
+    const correctText = correctBtn ? correctBtn.querySelector('.mc-text').textContent : '';
+    fb.className = 'mc-feedback bad';
+    fb.innerHTML = `✗ Incorrect. The answer was <strong>${escapeHtml(correctLabel)}.</strong> ${escapeHtml(correctText)}`;
+  }
+  fb.classList.remove('hidden');
+
+  // Reveal back side too so user can compare with full back content.
+  $('card-back').classList.remove('hidden');
+
+  // Record the result immediately (no rating step in MC mode).
+  const card = state.cards[state.idx];
+  state.results.push({
+    id: card.id,
+    correct: !!opt.isCorrect,
+    front: card.front,
+    back: card.back,
+    options: card.options,
+    pickedLabel: opt.label,
+    deck: card.deckName,
+    interval: card.interval,
+    ease: card.ease,
+    mode: 'mc',
+  });
+
+  // Auto-advance after 1.5s (per spec).
+  setTimeout(() => {
+    state.idx++;
+    if (state.idx >= state.cards.length) {
+      finishQuiz();
+    } else {
+      renderCard();
+    }
+  }, 1500);
 }
 
 $('show-answer').addEventListener('click', () => {
@@ -173,15 +278,25 @@ for (const btn of document.querySelectorAll('.rate')) {
 function rate(rating) {
   const c = state.cards[state.idx];
   if (!c) return;
-  state.results.push({
+  const result = {
     id: c.id,
-    rating,
     front: c.front,
     back: c.back,
     deck: c.deckName,
     interval: c.interval,
     ease: c.ease,
-  });
+  };
+  if (state.mode === 'mc') {
+    // record correctness + self-rating
+    const correct = state.mcPicked ? !!state.mcPicked.isCorrect : false;
+    result.correct = correct;
+    result.rating = rating;
+    result.pickedLabel = state.mcPicked ? state.mcPicked.label : null;
+    result.options = c.options;
+  } else {
+    result.rating = rating;
+  }
+  state.results.push(result);
   state.idx++;
   if (state.idx >= state.cards.length) {
     finishQuiz();
@@ -195,13 +310,18 @@ async function finishQuiz() {
   renderResults();
   // Send to backend to schedule.
   try {
+    const payload = {
+      deck: state.deck,
+      count: state.cards.length,
+      mode: state.mode,
+      results: state.results.map((r) => {
+        if (state.mode === 'mc') return { id: r.id, correct: r.correct, rating: r.rating };
+        return { id: r.id, rating: r.rating };
+      }),
+    };
     const r = await api('/api/finish', {
       method: 'POST',
-      body: JSON.stringify({
-        deck: state.deck,
-        count: state.cards.length,
-        results: state.results.map(({ id, rating }) => ({ id, rating })),
-      }),
+      body: JSON.stringify(payload),
     });
     $('schedule-status').textContent =
       r.scheduled > 0
@@ -218,24 +338,64 @@ async function finishQuiz() {
 
 function renderResults() {
   const total = state.results.length;
-  const good = state.results.filter((r) => ['good', 'easy'].includes(r.rating)).length;
-  const score = total ? Math.round((good / total) * 100) : 0;
+
+  // Score: for MC, % answered correctly. For recall, % good/easy.
+  let score = 0;
+  if (state.mode === 'mc') {
+    const correct = state.results.filter((r) => r.correct === true).length;
+    score = total ? Math.round((correct / total) * 100) : 0;
+  } else {
+    const good = state.results.filter((r) => ['good', 'easy'].includes(r.rating)).length;
+    score = total ? Math.round((good / total) * 100) : 0;
+  }
   $('score-big').textContent = `${score}%`;
 
-  const counts = { again: 0, hard: 0, good: 0, easy: 0 };
-  for (const r of state.results) counts[r.rating] = (counts[r.rating] || 0) + 1;
+  // Breakdown counts
+  const counts = { again: 0, hard: 0, good: 0, easy: 0, correct: 0, incorrect: 0 };
+  for (const r of state.results) {
+    if (state.mode === 'mc') {
+      counts[r.correct ? 'correct' : 'incorrect']++;
+      counts[r.rating] = (counts[r.rating] || 0) + 1;
+    } else {
+      counts[r.rating] = (counts[r.rating] || 0) + 1;
+    }
+  }
 
-  $('score-detail').innerHTML =
-    `<strong>${good}</strong> of <strong>${total}</strong> cards passed<br>` +
-    `Deck: <strong>${state.deck}</strong>`;
+  if (state.mode === 'mc') {
+    const correct = counts.correct;
+    $('score-detail').innerHTML =
+      `<strong>${correct}</strong> of <strong>${total}</strong> answered correctly<br>` +
+      `Mode: <strong>Multiple choice</strong> · Deck: <strong>${state.deck}</strong>`;
+  } else {
+    const good = counts.good + counts.easy;
+    $('score-detail').innerHTML =
+      `<strong>${good}</strong> of <strong>${total}</strong> cards passed<br>` +
+      `Mode: <strong>Recall</strong> · Deck: <strong>${state.deck}</strong>`;
+  }
 
   const bd = $('breakdown');
   bd.innerHTML = '';
-  for (const k of ['again', 'hard', 'good', 'easy']) {
-    const p = document.createElement('div');
-    p.className = `pill ${k}`;
-    p.innerHTML = `<div class="n">${counts[k] || 0}</div><div class="l">${k}</div>`;
-    bd.appendChild(p);
+  if (state.mode === 'mc') {
+    // Show correct/incorrect + rating breakdown
+    for (const k of ['correct', 'incorrect']) {
+      const p = document.createElement('div');
+      p.className = `pill ${k}`;
+      p.innerHTML = `<div class="n">${counts[k] || 0}</div><div class="l">${k}</div>`;
+      bd.appendChild(p);
+    }
+    for (const k of ['again', 'hard', 'good', 'easy']) {
+      const p = document.createElement('div');
+      p.className = `pill ${k}`;
+      p.innerHTML = `<div class="n">${counts[k] || 0}</div><div class="l">rated ${k}</div>`;
+      bd.appendChild(p);
+    }
+  } else {
+    for (const k of ['again', 'hard', 'good', 'easy']) {
+      const p = document.createElement('div');
+      p.className = `pill ${k}`;
+      p.innerHTML = `<div class="n">${counts[k] || 0}</div><div class="l">${k}</div>`;
+      bd.appendChild(p);
+    }
   }
 
   const list = $('card-list');
@@ -243,13 +403,26 @@ function renderResults() {
   for (let i = 0; i < state.results.length; i++) {
     const r = state.results[i];
     const li = document.createElement('li');
-    li.innerHTML = `
-      <div class="rating-tag ${r.rating}">${r.rating}</div>
-      <div>
-        <div class="q">${escapeHtml(r.front)}</div>
-        <div class="a">${escapeHtml(r.back)}</div>
-        <div class="meta-line">card #${r.id} · ${r.deck} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>
-      </div>`;
+
+    if (state.mode === 'mc') {
+      const tagClass = r.correct ? 'good' : 'again';
+      const tagLabel = r.correct ? '✓' : '✗';
+      li.innerHTML = `
+        <div class="rating-tag ${tagClass}">${tagLabel} ${escapeHtml(r.rating)}</div>
+        <div>
+          <div class="q">${escapeHtml(r.front)}</div>
+          <div class="a">${escapeHtml(r.back)}</div>
+          ${r.pickedLabel ? `<div class="meta-line">You picked <strong>${escapeHtml(r.pickedLabel)}</strong> · card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>` : `<div class="meta-line">card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>`}
+        </div>`;
+    } else {
+      li.innerHTML = `
+        <div class="rating-tag ${r.rating}">${r.rating}</div>
+        <div>
+          <div class="q">${escapeHtml(r.front)}</div>
+          <div class="a">${escapeHtml(r.back)}</div>
+          <div class="meta-line">card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>
+        </div>`;
+    }
     list.appendChild(li);
   }
 }
@@ -271,11 +444,28 @@ $('restart-btn').addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
   if (!screens.quiz.classList.contains('active')) return;
-  if (!state.revealed && (e.key === ' ' || e.key === 'Enter')) {
+
+  // MC mode: A/B/C/D pick an option (only before pick)
+  if (state.mode === 'mc' && !state.mcAnswered) {
+    const k = e.key.toUpperCase();
+    if (['A', 'B', 'C', 'D'].includes(k)) {
+      const btn = $('mc-options').querySelector(`.mc-option[data-label="${k}"]`);
+      if (btn && !btn.disabled) {
+        e.preventDefault();
+        btn.click();
+        return;
+      }
+    }
+  }
+
+  // Recall mode: space/enter to reveal
+  if (state.mode === 'recall' && !state.revealed && (e.key === ' ' || e.key === 'Enter')) {
     e.preventDefault();
     $('show-answer').click();
     return;
   }
+
+  // After reveal/pick: 1-4 rate
   if (state.revealed && ['1', '2', '3', '4'].includes(e.key)) {
     e.preventDefault();
     const map = { '1': 'again', '2': 'hard', '3': 'good', '4': 'easy' };
