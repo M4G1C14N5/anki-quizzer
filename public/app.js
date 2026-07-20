@@ -278,25 +278,17 @@ for (const btn of document.querySelectorAll('.rate')) {
 function rate(rating) {
   const c = state.cards[state.idx];
   if (!c) return;
-  const result = {
+  // MC mode auto-advances from pickMCOption; rate() should never be called there.
+  if (state.mode === 'mc') return;
+  state.results.push({
     id: c.id,
+    rating,
     front: c.front,
     back: c.back,
     deck: c.deckName,
     interval: c.interval,
     ease: c.ease,
-  };
-  if (state.mode === 'mc') {
-    // record correctness + self-rating
-    const correct = state.mcPicked ? !!state.mcPicked.isCorrect : false;
-    result.correct = correct;
-    result.rating = rating;
-    result.pickedLabel = state.mcPicked ? state.mcPicked.label : null;
-    result.options = c.options;
-  } else {
-    result.rating = rating;
-  }
-  state.results.push(result);
+  });
   state.idx++;
   if (state.idx >= state.cards.length) {
     finishQuiz();
@@ -310,15 +302,18 @@ async function finishQuiz() {
   renderResults();
   // Send to backend to schedule.
   try {
-    const payload = {
-      deck: state.deck,
-      count: state.cards.length,
-      mode: state.mode,
-      results: state.results.map((r) => {
-        if (state.mode === 'mc') return { id: r.id, correct: r.correct, rating: r.rating };
-        return { id: r.id, rating: r.rating };
-      }),
-    };
+    const payload = state.mode === 'mc'
+      ? {
+          deck: state.deck,
+          count: state.cards.length,
+          mode: 'mc',
+          results: state.results.map(({ id, correct }) => ({ id, correct })),
+        }
+      : {
+          deck: state.deck,
+          count: state.cards.length,
+          results: state.results.map(({ id, rating }) => ({ id, rating })),
+        };
     const r = await api('/api/finish', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -376,17 +371,11 @@ function renderResults() {
   const bd = $('breakdown');
   bd.innerHTML = '';
   if (state.mode === 'mc') {
-    // Show correct/incorrect + rating breakdown
+    // MC mode: just correct/incorrect scoring (no rating breakdown).
     for (const k of ['correct', 'incorrect']) {
       const p = document.createElement('div');
       p.className = `pill ${k}`;
       p.innerHTML = `<div class="n">${counts[k] || 0}</div><div class="l">${k}</div>`;
-      bd.appendChild(p);
-    }
-    for (const k of ['again', 'hard', 'good', 'easy']) {
-      const p = document.createElement('div');
-      p.className = `pill ${k}`;
-      p.innerHTML = `<div class="n">${counts[k] || 0}</div><div class="l">rated ${k}</div>`;
       bd.appendChild(p);
     }
   } else {
@@ -408,7 +397,7 @@ function renderResults() {
       const tagClass = r.correct ? 'good' : 'again';
       const tagLabel = r.correct ? '✓' : '✗';
       li.innerHTML = `
-        <div class="rating-tag ${tagClass}">${tagLabel} ${escapeHtml(r.rating)}</div>
+        <div class="rating-tag ${tagClass}">${tagLabel}</div>
         <div>
           <div class="q">${escapeHtml(r.front)}</div>
           <div class="a">${escapeHtml(r.back)}</div>
