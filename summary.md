@@ -55,14 +55,17 @@ ANKI_URL=http://192.168.192.119:8764 PORT=4318 node server.js
 
 ## Scheduling policy
 
-| Rating | Due in     | Ease Δ   |
-|--------|-----------|----------|
-| Again  | 1 minute  | —        |
-| Hard   | 6 minutes | −50      |
-| Good   | 1 day     | —        |
-| Easy   | 4 days    | +100     |
+| Rating | setDueDate `days` | Ease Δ (applied via setEaseFactors) |
+|--------|------------------|--------------------------------------|
+| Again  | `0` (immediately due) | −50 |
+| Hard   | `0` (immediately due) | −50 |
+| Good   | `1` (+1 day)        | —    |
+| Easy   | `4` (+4 days)       | +100 |
 
-(`adjustEase` is in 1000ths — so −50 = −0.05 ease, +100 = +0.10 ease.)
+Notes:
+- AnkiConnect's `setDueDate` only supports day-granularity (no minutes).
+- `adjustEase` doesn't exist; the equivalent is `setEaseFactors({cards, easeFactors})` with absolute factors (1000ths, clamped to 1300–5000). The code reads current factors via `cardsInfo` then adds the delta.
+- Sub-minute rescheduling isn't possible via AnkiConnect — we use `days: "0"` for Again/Hard which marks the card immediately due so it shows up in the next session.
 
 ## API surface
 

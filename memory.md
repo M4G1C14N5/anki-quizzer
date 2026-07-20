@@ -43,6 +43,13 @@ Tom needs to set Cloudflare SSL/TLS mode for this subdomain.
 - Custom healthcheck with `wget http://localhost:4318/api/health` failed because healthcheck calls AnkiConnect and times out → split into `/api/health` (fast liveness) and `/api/health/full` (slow probe).
 - Traefik router conflict after FQDN change. Auto-resolved once old container stopped. Persistent state would need `docker restart coolify-proxy`.
 - Coolify API gotcha: `PATCH /applications/{uuid}` accepts many fields but **rejects `fqdn`** (validation error). Workaround: use field name **`domains`** (not `fqdn`) with a full URL like `http://quizzer.camuedlabs.org`. See Coolify GitHub issue #9502.
+- AnkiConnect gotchas: (a) `setDueDate` takes `{cards: [...], days: "1"}` — `days` is a STRING and `card` (singular) doesn't work; (b) `adjustEase` doesn't exist; the equivalent is `setEaseFactors({cards, easeFactors})` which expects absolute factors (1000ths, 1300–5000). Code reads current factors first via `cardsInfo` then applies the delta.
+
+**Final state (2026-07-20 01:37 EDT):**
+- All 6 API endpoints working
+- End-to-end quiz verified via internal Traefik routing: 3-card Docker quiz → schedule 3 cards → no failures
+- Public URL via Cloudflare (`https://quizzer.camuedlabs.org`) still 530s — Cloudflare origin SSL not configured. Tom needs to add this subdomain to Cloudflare with SSL/TLS = Full or Flexible.
+- Until then, use: `http://192.168.192.119/` with `Host: quizzer.camuedlabs.org` header (LAN only), or the SSLip URL `https://hise8zugph4v9mltgwrcn1ug.192.168.192.119.sslip.io` (probably also 530 via Cloudflare proxy).
 
 ---
 
