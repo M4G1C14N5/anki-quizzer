@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Anki Quizzer</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>🃏 Anki Quizzer</h1>
+  <div class="status" id="status">
+    <span id="status-dot" class="dot"></span>
+    <span id="status-text">checking Anki…</span>
+  </div>
+</header>
+
+<main>
+  <!-- SETUP SCREEN -->
+  <section id="setup" class="screen active">
+    <h2>Pick a deck</h2>
+    <div class="deck-row">
+      <select id="deck-select" disabled>
+        <option>Loading decks…</option>
+      </select>
+      <button id="refresh-decks" class="ghost" title="Refresh deck list">↻</button>
+    </div>
+
+    <h2>How many questions?</h2>
+    <div class="count-row">
+      <input type="range" id="count-slider" min="1" max="20" value="10">
+      <output id="count-value">10</output>
+    </div>
+
+    <div class="actions">
+      <button id="start-btn" class="primary" disabled>Start quiz</button>
+    </div>
+
+    <details class="meta">
+      <summary>Anki status</summary>
+      <pre id="health-pre">loading…</pre>
+    </details>
+  </section>
+
+  <!-- QUIZ SCREEN -->
+  <section id="quiz" class="screen">
+    <div class="quiz-top">
+      <div class="progress">
+        <span id="q-index">0</span> / <span id="q-total">0</span>
+      </div>
+      <div class="deck-label" id="deck-label"></div>
+    </div>
+
+    <article class="card">
+      <div class="card-side front" id="card-front"></div>
+      <div class="card-side back hidden" id="card-back"></div>
+    </article>
+
+    <div class="actions" id="quiz-actions">
+      <button id="show-answer" class="primary">Show answer</button>
+    </div>
+
+    <div class="actions hidden" id="rate-actions">
+      <button class="rate again" data-rating="again"><span class="num">1</span><span class="label">Again</span></button>
+      <button class="rate hard" data-rating="hard"><span class="num">2</span><span class="label">Hard</span></button>
+      <button class="rate good" data-rating="good"><span class="num">3</span><span class="label">Good</span></button>
+      <button class="rate easy" data-rating="easy"><span class="num">4</span><span class="label">Easy</span></button>
+    </div>
+
+    <div class="hotkeys muted small">
+      Hotkeys: <kbd>Space</kbd> reveal · <kbd>1</kbd> again · <kbd>2</kbd> hard · <kbd>3</kbd> good · <kbd>4</kbd> easy
+    </div>
+  </section>
+
+  <!-- RESULTS SCREEN -->
+  <section id="results" class="screen">
+    <h2>Results</h2>
+    <div class="score-row">
+      <div class="score-big" id="score-big">0%</div>
+      <div class="score-detail" id="score-detail"></div>
+    </div>
+
+    <h3>Breakdown</h3>
+    <div class="breakdown" id="breakdown"></div>
+
+    <h3>Cards</h3>
+    <ol class="card-list" id="card-list"></ol>
+
+    <div class="actions">
+      <button id="restart-btn" class="primary">New quiz</button>
+    </div>
+
+    <div id="schedule-status" class="muted small"></div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
