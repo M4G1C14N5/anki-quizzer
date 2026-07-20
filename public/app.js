@@ -39,7 +39,7 @@ async function refreshHealth() {
   const dot = $('status-dot');
   const text = $('status-text');
   try {
-    const h = await api('/api/health');
+    const h = await api('/api/health/full');
     state.health = h;
     if (h.ok) {
       dot.className = 'dot ok';

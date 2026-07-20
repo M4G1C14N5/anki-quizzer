@@ -120,6 +120,18 @@ function scheduleForRating(rating) {
 // --- Routes ------------------------------------------------------------
 
 app.get('/api/health', async (_req, res) => {
+  // Liveness only — must return fast for Docker HEALTHCHECK.
+  // Anki status is a separate probe so a slow/unreachable Anki doesn't fail health.
+  res.json({
+    ok: true,
+    ankiUrl: ANKI_URL,
+    port: PORT,
+    time: new Date().toISOString(),
+  });
+});
+
+app.get('/api/health/full', async (_req, res) => {
+  // Slow probe: actually reach AnkiConnect.
   const ok = await ankiOk();
   res.json({
     ok: ok.ok,
