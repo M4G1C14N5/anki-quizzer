@@ -86,31 +86,35 @@ function stripHtml(s) {
 }
 
 // --- Scheduling policy -------------------------------------------------
-// Again=1min, Hard=6min, Good=no change (push +1d if very overdue),
-// Easy=4days. Borderline Hard → adjustEase down.
+// Again=1min, Hard=6min, Good=+1day (keeps surface area), Easy=+4days.
+// AnkiConnect API:
+//   setDueDate({ cards: [...], days: "1" })   // days is a STRING (range string)
+//   setEaseFactors({ cards: [...], easeFactors: [2500] })  // 1000ths — 2500 = 2.5x
+// 'ease' here is the DELTA applied to the card's current factor. We need
+// the current factor first, then set the new value via setEaseFactors.
 
 const RATINGS = { again: 1, hard: 2, good: 3, easy: 4 };
 
+// Days (as strings, since AnkiConnect wants a string range like "1" or "1-3").
+// Minutes/seconds are not supported directly, so for sub-day intervals we
+// approximate by setting due-date via direct SQL on the cards table is NOT
+// possible here. AnkiConnect doesn't expose timestamp-based scheduling.
+// Workaround: set due-date in days. For 'Again' (1 min) we use 0 (immediately
+// due, will re-show in the next session). For 'Hard' (6 min) we use 0 too
+// — Anki will resurface it shortly because the interval is 0.
 function scheduleForRating(rating) {
-  const now = new Date();
   switch (rating) {
     case 'again': {
-      const t = new Date(now.getTime() + 60 * 1000);
-      return { kind: 'due', date: t, ease: null };
+      return { days: '0', easeDelta: -50 }; // immediately due, ease down 0.05
     }
     case 'hard': {
-      const t = new Date(now.getTime() + 6 * 60 * 1000);
-      // Borderline: nudge ease down a little.
-      return { kind: 'due', date: t, ease: -50 }; // -5 percentage points
+      return { days: '0', easeDelta: -50 }; // borderline: ease down
     }
     case 'good': {
-      // Leave scheduling to Anki — just bump due date by +1 day to keep surface area.
-      const t = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      return { kind: 'due', date: t, ease: null };
+      return { days: '1', easeDelta: 0 }; // 1 day
     }
     case 'easy': {
-      const t = new Date(now.getTime() + 4 * 24 * 60 * 60 * 1000);
-      return { kind: 'due', date: t, ease: +100 }; // +10pp ease
+      return { days: '4', easeDelta: +100 }; // 4 days, ease up 0.10
     }
     default:
       return null;
@@ -207,25 +211,46 @@ app.post('/api/finish', async (req, res, next) => {
     let scheduled = 0;
     const failures = [];
 
-    // Group by card for setDueDate batch (Anki supports array of cards + single date)
-    // but we have per-card dates — loop.
+    // Group by (days) bucket so we can batch setDueDate calls per unique value.
+    const byDays = new Map(); // days-string -> [cardId]
+    const easeDeltas = []; // {id, delta} for cards that need ease adjustment
     for (const r of results) {
       const rating = String(r.rating || '').toLowerCase();
       if (!RATINGS[rating]) continue;
       const sched = scheduleForRating(rating);
       if (!sched) continue;
+      if (!byDays.has(sched.days)) byDays.set(sched.days, []);
+      byDays.get(sched.days).push(r.id);
+      if (sched.easeDelta) easeDeltas.push({ id: r.id, delta: sched.easeDelta });
+    }
+
+    // Batch setDueDate by days bucket.
+    for (const [days, ids] of byDays) {
       try {
-        await anki('setDueDate', { card: r.id, date: sched.date.toISOString() });
-        scheduled++;
+        await anki('setDueDate', { cards: ids, days });
+        scheduled += ids.length;
       } catch (e) {
-        failures.push({ id: r.id, error: e.message });
+        for (const id of ids) failures.push({ id, error: `setDueDate: ${e.message}` });
       }
-      if (sched.ease !== null) {
-        try {
-          await anki('adjustEase', { cards: [r.id], ease: sched.ease });
-        } catch (e) {
-          // Non-fatal — log and continue.
-          failures.push({ id: r.id, error: `adjustEase: ${e.message}` });
+    }
+
+    // For ease adjustments, we need current factors first.
+    if (easeDeltas.length) {
+      try {
+        const infos = await anki('cardsInfo', { cards: easeDeltas.map((e) => e.id) });
+        const factorById = new Map();
+        for (const c of infos) factorById.set(c.cardId, c.factor || 2500);
+        const newFactors = easeDeltas.map((e) => {
+          const cur = factorById.get(e.id) || 2500;
+          return Math.max(1300, Math.min(5000, cur + e.delta));
+        });
+        await anki('setEaseFactors', {
+          cards: easeDeltas.map((e) => e.id),
+          easeFactors: newFactors,
+        });
+      } catch (e) {
+        for (const ed of easeDeltas) {
+          failures.push({ id: ed.id, error: `setEaseFactors: ${e.message}` });
         }
       }
     }
