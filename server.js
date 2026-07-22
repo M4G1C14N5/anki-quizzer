@@ -1,6 +1,8 @@
-// Anki Quizzer — single-file Node.js server
+// Anki Quizzer — Node.js 22 + Express 4 server.
+//
 // Proxies AnkiConnect requests from the browser to avoid CORS / API key leakage,
-// and persists quiz results + last-results.json.
+// persists quiz results + last-results.json, and (in v2) drives two LLM-backed
+// quiz-generation modes: /api/session-quiz and cluster-aware /api/quiz?mode=mc.
 //
 // AnkiConnect reachable at: ANKI_URL env (default http://anki-desktop:8765)
 //   - Inside Coolify/coolify network: http://anki-desktop:8765 (container hostname)
@@ -8,20 +10,31 @@
 //
 // Endpoints:
 //   GET  /api/health              -> { ok, ankiUrl, ankiReachable, ankiVersion }
-//   GET  /api/decks               -> [ "Default", "Docker", ... ]
-//   POST /api/quiz {deck, count, mode} -> { deck, count, mode, cards:[...] }
+//   GET  /api/health/full         -> same, with actual AnkiConnect probe
+//   GET  /api/decks               -> { decks: [...] }
+//   POST /api/quiz {deck, count, mode}
 //        mode: "recall" (default) -> cards: [{id, front, back, tags, interval, ease}]
-//        mode: "mc"      -> cards: [{id, front, back, options:[{label, text, isCorrect}], ...}]
-//   POST /api/finish {deck, count, mode, results:[{id, rating?} | {id, correct}]}
-//        -> schedules via setDueDate / setEaseFactors, returns { saved:true, scheduled:n }
-//        For MC mode, results use {id, correct: true|false} which maps to good/again.
-//   GET  /api/last-results        -> last-results.json contents
+//        mode: "mc"      -> cards: [{id, ..., options:[{label, text, isCorrect, explanation}]}]
+//                           v2: grouped by primary tag, one LLM call per cluster,
+//                               rich distractors, content-hash cached. Without
+//                               LLM_API_KEY, falls back to distractor-from-backs.
+//   POST /api/session-quiz {summary, memory}
+//        -> { concepts: [{title, background, intuition, quiz:[...5 MCQs]}] }
+//   POST /api/finish {deck, count, mode, results:[...]}
+//        -> schedules via setDueDate + setEaseFactors; returns { saved, scheduled }
+//   GET  /api/last-results        -> last quiz summary
+//   GET  /api/history             -> { count, history: [...] }
+//   POST /api/llm-cache/clear     -> wipe cluster-cache file (LAN-only auth)
 //   GET  /                        -> static public/index.html
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
+const crypto = require('crypto');
+const { callLLM } = require('./lib/llm');
+const { fillSessionPrompt, fillClusterPrompt } = require('./lib/prompts');
+const clusterCache = require('./lib/cluster-cache');
 
 const PORT = parseInt(process.env.PORT || '4318', 10);
 const ANKI_URL = process.env.ANKI_URL || 'http://anki-desktop:8765';
@@ -69,11 +82,10 @@ async function ankiOk() {
   }
 }
 
-// --- HTML stripper (Anki fields include HTML markup) -------------------
+// --- HTML stripper -----------------------------------------------------
 
 function stripHtml(s) {
   if (!s) return '';
-  // Preserve line breaks, drop everything else.
   return String(s)
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n')
@@ -89,46 +101,141 @@ function stripHtml(s) {
 }
 
 // --- Scheduling policy -------------------------------------------------
-// Again=1min, Hard=6min, Good=+1day (keeps surface area), Easy=+4days.
-// AnkiConnect API:
-//   setDueDate({ cards: [...], days: "1" })   // days is a STRING (range string)
-//   setEaseFactors({ cards: [...], easeFactors: [2500] })  // 1000ths — 2500 = 2.5x
-// 'ease' here is the DELTA applied to the card's current factor. We need
-// the current factor first, then set the new value via setEaseFactors.
+// Again=1min, Hard=6min, Good=+1day, Easy=+4days. AnkiConnect doesn't
+// expose timestamp scheduling so sub-day intervals use days=0 (immediately due).
 
 const RATINGS = { again: 1, hard: 2, good: 3, easy: 4 };
 
-// Days (as strings, since AnkiConnect wants a string range like "1" or "1-3").
-// Minutes/seconds are not supported directly, so for sub-day intervals we
-// approximate by setting due-date via direct SQL on the cards table is NOT
-// possible here. AnkiConnect doesn't expose timestamp-based scheduling.
-// Workaround: set due-date in days. For 'Again' (1 min) we use 0 (immediately
-// due, will re-show in the next session). For 'Hard' (6 min) we use 0 too
-// — Anki will resurface it shortly because the interval is 0.
 function scheduleForRating(rating) {
   switch (rating) {
-    case 'again': {
-      return { days: '0', easeDelta: -50 }; // immediately due, ease down 0.05
-    }
-    case 'hard': {
-      return { days: '0', easeDelta: -50 }; // borderline: ease down
-    }
-    case 'good': {
-      return { days: '1', easeDelta: 0 }; // 1 day
-    }
-    case 'easy': {
-      return { days: '4', easeDelta: +100 }; // 4 days, ease up 0.10
-    }
-    default:
-      return null;
+    case 'again': return { days: '0', easeDelta: -50 };
+    case 'hard':  return { days: '0', easeDelta: -50 };
+    case 'good':  return { days: '1', easeDelta: 0 };
+    case 'easy':  return { days: '4', easeDelta: +100 };
+    default: return null;
+  }
+}
+
+// --- v2 generation-mode helpers ----------------------------------------
+// /api/session-quiz: LLM generates 1–3 concepts from summary+memory with 5 MCQs each.
+// /api/quiz?mode=mc (v2): group cards by primary tag, one LLM call per cluster,
+//   cache per-cluster results by content hash; fall back to distractor-from-backs
+//   (no explanations) if LLM_API_KEY is missing or the call fails.
+
+function primaryTag(tags) {
+  if (!Array.isArray(tags) || tags.length === 0) return '_untagged';
+  return String(tags[0]);
+}
+
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Take a list of options (already has correct:true/false), apply a final
+// server-side shuffle, and assign labels A..D.
+function labelAndShuffle(options) {
+  if (!Array.isArray(options)) return [];
+  const cleaned = options.map((o) => ({
+    text: String(o && o.text ? o.text : ''),
+    isCorrect: !!(o && o.correct === true),
+    explanation: (o && typeof o.explanation === 'string') ? o.explanation : undefined,
+  }));
+  shuffleInPlace(cleaned);
+  const labels = ['A', 'B', 'C', 'D', 'E', 'F'];
+  return cleaned.slice(0, 4).map((o, i) => ({
+    label: labels[i],
+    text: o.text,
+    isCorrect: o.isCorrect,
+    ...(o.explanation ? { explanation: o.explanation } : {}),
+  }));
+}
+
+// Group cards by primary tag. If most cards have no tags (or there is only
+// one tag bucket), treat them as a single cluster to avoid degenerate tiny
+// clusters that would each cost an LLM call.
+function groupByPrimaryTag(cards) {
+  const buckets = new Map();
+  for (const c of cards) {
+    const t = primaryTag(c.tags);
+    if (!buckets.has(t)) buckets.set(t, []);
+    buckets.get(t).push(c);
+  }
+  const total = cards.length;
+  const untaggedSize = buckets.get('_untagged')?.length || 0;
+  if (buckets.size <= 1) return [cards];
+  if (untaggedSize / Math.max(1, total) > 0.6) return [cards];
+  return Array.from(buckets.values());
+}
+
+// Legacy MC fallback: 3 distractors picked from other cards' backs.
+// Returns labelled options [A,B,C,D] without explanations.
+function legacyMcDistractors(card, pool) {
+  const distractors = [];
+  const used = new Set([card.id]);
+  const candidates = pool.slice();
+  shuffleInPlace(candidates);
+  for (const cand of candidates) {
+    if (distractors.length >= 3) break;
+    if (used.has(cand.id)) continue;
+    if (!cand.back || cand.back.trim() === card.back.trim()) continue;
+    distractors.push(cand.back);
+    used.add(cand.id);
+  }
+  while (distractors.length < 3) {
+    distractors.push(`(no distractor available ${distractors.length + 1})`);
+  }
+  const opts = [
+    { label: 'A', text: card.back, isCorrect: true },
+    { label: 'B', text: distractors[0], isCorrect: false },
+    { label: 'C', text: distractors[1], isCorrect: false },
+    { label: 'D', text: distractors[2], isCorrect: false },
+  ];
+  shuffleInPlace(opts);
+  return opts;
+}
+
+// One LLM call for a cluster; caches per sha256(deckName|cardIds|contentHash).
+// Returns { entry, fromCache, error }. Caller decides what to do on error.
+async function buildClusterMC(cluster, deckName) {
+  const contentHash = clusterCache.contentHashForCards(cluster);
+  const key = clusterCache.clusterKey(deckName, cluster.map((c) => c.id), contentHash);
+
+  const cached = clusterCache.get(key);
+  if (cached) {
+    return { entry: cached, fromCache: true, error: null };
+  }
+  if (!process.env.LLM_API_KEY) {
+    return { entry: null, fromCache: false, error: 'LLM_API_KEY not set' };
+  }
+  try {
+    const userPrompt = fillClusterPrompt(cluster.map((c) => ({
+      id: String(c.id),
+      front: c.front,
+      back: c.back,
+    })));
+    const parsed = await callLLM({ userPrompt, expectJson: true });
+    const entry = {
+      deckName,
+      cardIds: cluster.map((c) => String(c.id)),
+      contentHash,
+      background: String(parsed?.background || ''),
+      intuition: String(parsed?.intuition || ''),
+      cards: Array.isArray(parsed?.cards) ? parsed.cards : [],
+    };
+    clusterCache.set(key, entry);
+    return { entry, fromCache: false, error: null };
+  } catch (e) {
+    return { entry: null, fromCache: false, error: e.message };
   }
 }
 
 // --- Routes ------------------------------------------------------------
 
 app.get('/api/health', async (_req, res) => {
-  // Liveness only — must return fast for Docker HEALTHCHECK.
-  // Anki status is a separate probe so a slow/unreachable Anki doesn't fail health.
   res.json({
     ok: true,
     ankiUrl: ANKI_URL,
@@ -138,7 +245,6 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.get('/api/health/full', async (_req, res) => {
-  // Slow probe: actually reach AnkiConnect.
   const ok = await ankiOk();
   res.json({
     ok: ok.ok,
@@ -174,18 +280,15 @@ app.post('/api/quiz', async (req, res, next) => {
       return res.json({ deck, count, mode, cards: [], message: 'No cards found in this deck.' });
     }
 
-    // Shuffle and slice. In MC mode, fetch count + 3*count extra cards so we
-    // have enough backs to use as distractors (cap at total deck size).
+    // Shuffle and slice. In MC mode, pull count*4 so we have a richer pool
+    // both for distractors (fallback path) and for cluster grouping.
     const shuffled = cardIds.slice().sort(() => Math.random() - 0.5);
     const poolSize = mode === 'mc' ? Math.min(cardIds.length, count * 4) : count;
     const pool = shuffled.slice(0, poolSize);
     const picked = mode === 'mc' ? pool.slice(0, count) : pool;
 
-    // getCards → ['1494727644693', ...]
-    // cardsInfo → [{ cardId, fields, interval, ease, ... }]
     const info = await anki('cardsInfo', { cards: pool });
 
-    // Index pool by cardId so we can pull distractors from non-question cards.
     const poolById = new Map();
     for (const c of info) {
       if (!c || !c.fields) continue;
@@ -204,54 +307,199 @@ app.post('/api/quiz', async (req, res, next) => {
       });
     }
 
-    // For MC, we need a pool of distractor candidates drawn from OTHER cards'
-    // backs in the deck pool. Use any card not equal to the current question.
-    let distractorPool = [];
-    if (mode === 'mc') {
-      distractorPool = Array.from(poolById.values()).filter((c) => c.back && c.back.trim());
+    let cards = [];
+
+    if (mode === 'mc' && process.env.LLM_API_KEY) {
+      // Cluster-aware MC. Group the pool by primary tag, fire one LLM call
+      // per cluster in parallel, cache results. If LLM errors on a cluster,
+      // fall back to legacy distractor-from-backs for that cluster only.
+      const clusterInputs = Array.from(poolById.values()).map((c) => ({
+        id: String(c.id),
+        front: c.front,
+        back: c.back,
+        tags: c.tags,
+        _pool: c,
+      }));
+      const clusters = groupByPrimaryTag(clusterInputs);
+
+      let cacheHits = 0;
+      let llmCalls = 0;
+      let fellBack = 0;
+      const clusterEntries = await Promise.all(clusters.map(async (cl) => {
+        const { entry, fromCache, error } = await buildClusterMC(
+          cl.map((c) => ({ id: c.id, front: c.front, back: c.back })),
+          deck,
+        );
+        if (entry) {
+          if (fromCache) cacheHits++; else llmCalls++;
+          return { ok: true, entry, cluster: cl };
+        }
+        if (error) {
+          fellBack++;
+          console.warn(`[mc] cluster (${cl.length} cards) fell back: ${error}`);
+        }
+        return { ok: false, cluster: cl };
+      }));
+
+      const used = new Set();
+      const labelled = [];
+
+      for (const ce of clusterEntries) {
+        if (ce.ok) {
+          for (const c of ce.entry.cards) {
+            const idStr = String(c.id);
+            if (used.has(idStr)) continue;
+            const poolCard = ce.cluster.find((x) => String(x.id) === idStr);
+            if (!poolCard) continue;
+            const options = labelAndShuffle(c.options || []);
+            if (options.length !== 4 || options.filter((o) => o.isCorrect).length !== 1) continue;
+            labelled.push({
+              id: poolCard._pool.id,
+              front: poolCard._pool.front,
+              back: poolCard._pool.back,
+              tags: poolCard._pool.tags,
+              interval: poolCard._pool.interval,
+              ease: poolCard._pool.ease,
+              deckName: poolCard._pool.deckName,
+              options,
+              cluster: {
+                background: ce.entry.background,
+                intuition: ce.entry.intuition,
+              },
+            });
+            used.add(idStr);
+            if (labelled.length >= count) break;
+          }
+        } else {
+          // Hard fallback for this cluster: legacy distractors, no explanations.
+          const distractorPool = Array.from(poolById.values()).filter(
+            (c) => c.back && c.back.trim(),
+          );
+          for (const pc of ce.cluster) {
+            const idStr = String(pc.id);
+            if (used.has(idStr)) continue;
+            labelled.push({
+              id: pc._pool.id,
+              front: pc._pool.front,
+              back: pc._pool.back,
+              tags: pc._pool.tags,
+              interval: pc._pool.interval,
+              ease: pc._pool.ease,
+              deckName: pc._pool.deckName,
+              options: legacyMcDistractors(pc._pool, distractorPool),
+            });
+            used.add(idStr);
+            if (labelled.length >= count) break;
+          }
+        }
+        if (labelled.length >= count) break;
+      }
+
+      // Top-up pad if cluster mode couldn't reach `count`.
+      if (labelled.length < count) {
+        const distractorPool = Array.from(poolById.values()).filter(
+          (c) => c.back && c.back.trim(),
+        );
+        let i = 0;
+        while (labelled.length < count && distractorPool.length) {
+          const cand = distractorPool[i++ % distractorPool.length];
+          const idStr = String(cand.id);
+          if (used.has(idStr)) continue;
+          labelled.push({
+            id: cand.id,
+            front: cand.front,
+            back: cand.back,
+            tags: cand.tags,
+            interval: cand.interval,
+            ease: cand.ease,
+            deckName: cand.deckName,
+            options: legacyMcDistractors(cand, distractorPool),
+          });
+          used.add(idStr);
+        }
+      }
+
+      cards = labelled.slice(0, count);
+      console.log(
+        `[mc] deck=${deck} clusters=${clusters.length} cacheHits=${cacheHits}` +
+        ` llmCalls=${llmCalls} fellBack=${fellBack} returned=${cards.length}`,
+      );
+    } else if (mode === 'mc') {
+      // No LLM_API_KEY → legacy path; no explanations on options.
+      console.warn('[mc] LLM_API_KEY not set — using distractor-from-backs mode (no explanations)');
+      const distractorPool = Array.from(poolById.values()).filter(
+        (c) => c.back && c.back.trim(),
+      );
+      cards = picked.map((cardRef) => {
+        const cardId = typeof cardRef === 'object' ? cardRef.cardId : cardRef;
+        const c = poolById.get(cardId);
+        if (!c) return null;
+        return { ...c, options: legacyMcDistractors(c, distractorPool) };
+      }).filter(Boolean);
+    } else {
+      cards = picked.map((cardRef) => {
+        const cardId = typeof cardRef === 'object' ? cardRef.cardId : cardRef;
+        return poolById.get(cardId);
+      }).filter(Boolean);
     }
-
-    const cards = picked.map((cardRef) => {
-      const cardId = typeof cardRef === 'object' ? cardRef.cardId : cardRef;
-      const c = poolById.get(cardId);
-      if (!c) return null;
-
-      if (mode !== 'mc') return c;
-
-      // MC mode: build 3 distractors from other cards' backs.
-      const distractors = [];
-      const used = new Set([cardId]);
-      // Fisher-Yates on distractorPool, skip used ids.
-      const candidates = distractorPool.slice();
-      for (let i = candidates.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
-      }
-      for (const cand of candidates) {
-        if (distractors.length >= 3) break;
-        if (used.has(cand.id)) continue;
-        if (!cand.back || cand.back.trim() === c.back.trim()) continue;
-        distractors.push(cand.back);
-        used.add(cand.id);
-      }
-
-      // If we couldn't get 3 unique distractors (tiny deck), pad with placeholders.
-      while (distractors.length < 3) {
-        distractors.push(`(no distractor available ${distractors.length + 1})`);
-      }
-
-      const options = [
-        { label: 'A', text: c.back, isCorrect: true },
-        { label: 'B', text: distractors[0], isCorrect: false },
-        { label: 'C', text: distractors[1], isCorrect: false },
-        { label: 'D', text: distractors[2], isCorrect: false },
-      ].sort(() => Math.random() - 0.5);
-
-      return { ...c, options };
-    }).filter(Boolean);
 
     res.json({ deck, count, mode, cards });
   } catch (e) { next(e); }
+});
+
+app.post('/api/session-quiz', async (req, res, next) => {
+  try {
+    const summary = (req.body && req.body.summary) || '';
+    const memory = (req.body && req.body.memory) || '';
+    if (!summary.trim() && !memory.trim()) {
+      return res.status(400).json({ error: 'summary and memory are both empty' });
+    }
+    if (!process.env.LLM_API_KEY) {
+      return res.status(503).json({
+        error: 'LLM_API_KEY is not set — /api/session-quiz requires it',
+      });
+    }
+
+    const userPrompt = fillSessionPrompt(summary, memory);
+    const parsed = await callLLM({ userPrompt, expectJson: true });
+
+    const rawConcepts = Array.isArray(parsed?.concepts) ? parsed.concepts : [];
+    const concepts = rawConcepts.map((c) => ({
+      title: String(c?.title || ''),
+      background: String(c?.background || ''),
+      intuition: String(c?.intuition || ''),
+      quiz: Array.isArray(c?.quiz) ? c.quiz.map((q) => ({
+        question: String(q?.question || ''),
+        options: labelAndShuffle(q?.options || []),
+      })).filter((q) => q.options.length === 4) : [],
+    })).filter((c) => c.quiz.length > 0);
+
+    if (!concepts.length) {
+      return res.status(502).json({ error: 'LLM returned no usable concepts' });
+    }
+
+    res.json({ concepts });
+  } catch (e) {
+    // Surface auth failures with a clear message (Tom requested 500-with-clear-msg on fake keys).
+    if (e && /LLM auth failed/i.test(e.message)) {
+      return res.status(500).json({ error: e.message });
+    }
+    if (e && e.code === 'LLM_NO_KEY') {
+      return res.status(503).json({ error: e.message });
+    }
+    next(e);
+  }
+});
+
+app.post('/api/llm-cache/clear', async (_req, res) => {
+  // AUTH: deliberately not required — this is a LAN-only Coolify deploy.
+  // Call this to force regeneration of the cluster cache after content updates.
+  try {
+    clusterCache.clear();
+    res.json({ ok: true, cleared: clusterCache.path() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/finish', async (req, res, next) => {
@@ -264,8 +512,6 @@ app.post('/api/finish', async (req, res, next) => {
     let scheduled = 0;
     const failures = [];
 
-    // For MC mode, each result has {id, correct: bool} → map to rating.
-    // For recall mode, each result has {id, rating}.
     function ratingForResult(r) {
       if (mode === 'mc') {
         if (typeof r.correct === 'boolean') return r.correct ? 'good' : 'again';
@@ -275,9 +521,8 @@ app.post('/api/finish', async (req, res, next) => {
       return RATINGS[rating] ? rating : null;
     }
 
-    // Group by (days) bucket so we can batch setDueDate calls per unique value.
-    const byDays = new Map(); // days-string -> [cardId]
-    const easeDeltas = []; // {id, delta} for cards that need ease adjustment
+    const byDays = new Map();
+    const easeDeltas = [];
     for (const r of results) {
       const rating = ratingForResult(r);
       if (!rating) continue;
@@ -288,7 +533,6 @@ app.post('/api/finish', async (req, res, next) => {
       if (sched.easeDelta) easeDeltas.push({ id: r.id, delta: sched.easeDelta });
     }
 
-    // Batch setDueDate by days bucket.
     for (const [days, ids] of byDays) {
       try {
         await anki('setDueDate', { cards: ids, days });
@@ -298,7 +542,6 @@ app.post('/api/finish', async (req, res, next) => {
       }
     }
 
-    // For ease adjustments, we need current factors first.
     if (easeDeltas.length) {
       try {
         const infos = await anki('cardsInfo', { cards: easeDeltas.map((e) => e.id) });
@@ -375,5 +618,6 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[anki-quizzer] listening on :${PORT}, ANKI_URL=${ANKI_URL}`);
+  console.log(`[anki-quizzer] listening on :${PORT}, ANKI_URL=${ANKI_URL}` +
+    (process.env.LLM_API_KEY ? ' LLM=ON' : ' LLM=OFF'));
 });
