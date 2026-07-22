@@ -2,16 +2,17 @@
 
 A self-hosted quiz web app for Anki flashcards. Pick a deck, answer questions in **Recall** or **Multiple Choice** mode, and have results automatically fed back into Anki's spaced-repetition scheduler.
 
-Built for Tom's weekly knowledge-gauge workflow. Deploy it anywhere with Docker.
+Deploy anywhere with Docker.
 
 ---
 
 ## Features
 
-- **Two quiz modes**
-  - **Recall** — classic flashcard: see front → reveal back → rate Again / Hard / Good / Easy
-  - **Multiple Choice** — see question + 4 shuffled options, instant correct/wrong feedback
-- **Automatic Anki scheduling** — quiz results reschedule cards via AnkiConnect (setDueDate + ease adjustment)
+- **Three quiz modes**
+  - **Recall** — see front → reveal back → rate Again / Hard / Good / Easy
+  - **Multiple Choice** — LLM-generated distractors with per-option explanations (see [llm-cluster-mc.md](references/llm-cluster-mc.md))
+  - **Session** — generate a fresh quiz from pasted summary + memory, no deck required (see [session-mode.md](references/session-mode.md))
+- **Automatic Anki scheduling** — quiz results reschedule cards via AnkiConnect (`setDueDate` + ease adjustment)
 - **Deck picker** — fetches live deck list from Anki
 - **Quiz history** — persisted locally (JSONL), browsable via the app
 - **Hotkeys** — Space to reveal, 1–4 to rate
@@ -32,7 +33,7 @@ Built for Tom's weekly knowledge-gauge workflow. Deploy it anywhere with Docker.
 git clone https://github.com/M4G1C14N5/anki-quizzer.git
 cd anki-quizzer
 cp .env.template .env
-# Edit .env — set ANKI_URL to your Anki instance
+# Edit .env — set ANKI_URL (and LLM_* if using session/cluster MC)
 
 npm install
 node server.js
@@ -55,18 +56,27 @@ docker run -d -p 4318:4318 \
 ### Coolify (recommended for self-hosted)
 
 1. Point Coolify at `https://github.com/M4G1C14N5/anki-quizzer`
-2. Set env vars: `PORT=4318`, `ANKI_URL=http://<anki-host>:8764`
+2. Set env vars: `PORT=4318`, `ANKI_URL=http://<anki-host>:8764`, plus `LLM_*` if using LLM modes
 3. Deploy — the Dockerfile handles the rest
 
 ---
 
 ## Environment Variables
 
-| Variable   | Default               | Description                              |
-|------------|-----------------------|------------------------------------------|
-| `PORT`     | `4318`                | HTTP port the server listens on          |
-| `ANKI_URL` | `http://anki-desktop:8765` | AnkiConnect HTTP endpoint            |
-| `DATA_DIR`  | `./data` (container) | Where quiz history files are stored    |
+See [`references/env-setup.md`](references/env-setup.md) for full setup (network topologies, LLM vars, troubleshooting).
+
+Quick reference:
+
+| Variable   | Required | Description                              |
+|------------|----------|------------------------------------------|
+| `PORT`     | yes      | HTTP port (default `4318`)               |
+| `ANKI_URL` | yes      | AnkiConnect endpoint                     |
+| `DATA_DIR`  | no       | History storage (default `./data`)       |
+| `LLM_API_KEY` | for session/cluster MC | OpenAI-compatible API key      |
+| `LLM_BASE_URL` | optional            | Default `https://api.minimax.io/v1`     |
+| `LLM_MODEL` | optional | Default `MiniMax-M3`                     |
+| `LLM_CACHE_DIR` | optional          | Cluster cache dir (default `./data/llm-cache`) |
+| `LLM_TIMEOUT_MS` | optional         | Default `30000` (use `90000` for reasoning models) |
 
 ---
 
@@ -79,6 +89,8 @@ docker run -d -p 4318:4318 \
 | GET    | `/api/decks`           | List all decks from Anki                   |
 | POST   | `/api/quiz`            | Start a quiz → returns N cards             |
 | POST   | `/api/finish`          | Submit answers, reschedule in Anki         |
+| POST   | `/api/session-quiz`    | Generate MC quiz from session summary + memory — see [session-mode.md](references/session-mode.md) |
+| POST   | `/api/llm-cache/clear` | Wipe on-disk cluster cache                 |
 | GET    | `/api/last-results`    | Last quiz summary                          |
 | GET    | `/api/history`         | Full quiz history (JSONL)                  |
 
@@ -88,24 +100,9 @@ docker run -d -p 4318:4318 \
 // Request
 { "deck": "Docker", "count": 10, "mode": "recall" }
 // mode: "recall" (default) | "mc"
-
-// Response
-{
-  "deck": "Docker",
-  "count": 10,
-  "cards": [
-    {
-      "id": "1494727644693",
-      "front": "What flag does `docker run` use to expose a port?",
-      "back": "-p or --publish",
-      "tags": ["docker", "networking"],
-      "interval": 4,
-      "ease": 2500,
-      "options": [...]  // only in "mc" mode
-    }
-  ]
-}
 ```
+
+See [llm-cluster-mc.md](references/llm-cluster-mc.md) for how `mode: "mc"` works in v2.
 
 ### `POST /api/finish`
 
@@ -124,23 +121,25 @@ docker run -d -p 4318:4318 \
 
 ## AnkiConnect Endpoints Used
 
-| Action          | Purpose                              |
-|-----------------|--------------------------------------|
-| `version`       | Health probe                         |
-| `deckNames`     | Populate deck picker                 |
-| `findCards`      | Random card selection by deck query  |
-| `cardsInfo`      | Fetch card fields, interval, ease    |
-| `setDueDate`    | Reschedule cards by rating           |
-| `setEaseFactors` | Adjust ease (delta applied to current) |
+| Action            | Purpose                              |
+|-------------------|--------------------------------------|
+| `version`         | Health probe                         |
+| `deckNames`       | Populate deck picker                 |
+| `findCards`       | Random card selection by deck query  |
+| `cardsInfo`       | Fetch card fields, interval, ease    |
+| `setDueDate`      | Reschedule cards by rating           |
+| `setEaseFactors`  | Adjust ease (absolute, in 1000ths)   |
 
 ### Scheduling Policy
 
-| Rating | Interval effect            | Ease delta |
-|--------|---------------------------|------------|
-| Again  | Due immediately (day 0)    | −50        |
-| Hard   | Due immediately (day 0)    | −50        |
-| Good   | +1 day                     | 0          |
-| Easy   | +4 days                    | +100       |
+| Rating    | Interval effect           | Ease delta |
+|-----------|---------------------------|------------|
+| Again     | Due immediately (day 0)   | −50        |
+| Hard      | Due immediately (day 0)   | −50        |
+| Good      | +1 day                    | 0          |
+| Easy      | +4 days                   | +100       |
+| MC correct | Same as Good             | 0          |
+| MC wrong   | Same as Again            | −50        |
 
 ---
 
@@ -148,22 +147,30 @@ docker run -d -p 4318:4318 \
 
 ```
 anki-quizzer/
-├── server.js          # Express API server
+├── server.js              # Express API server
+├── lib/
+│   ├── llm.js             # OpenAI-compatible LLM client (timeout, retry, strip thinking blocks)
+│   ├── cluster-cache.js   # On-disk cluster cache (sha256-keyed)
+│   └── prompts.js         # SESSION_PROMPT + CLUSTER_PROMPT templates
 ├── public/
-│   ├── index.html     # 3-screen SPA
-│   ├── styles.css     # Dark theme
-│   └── app.js         # Frontend logic
-├── Dockerfile         # Production container
-├── .env.template      # Env var template
-├── README.md          # This file
-├── summary.md         # Project notes (gitignored)
-└── memory.md          # Session log (gitignored)
+│   ├── index.html         # 3-screen SPA
+│   ├── styles.css         # Dark theme
+│   └── app.js             # Frontend logic
+├── references/
+│   ├── env-setup.md       # ANKI_URL topologies + LLM env vars
+│   ├── session-mode.md    # POST /api/session-quiz deep dive
+│   └── llm-cluster-mc.md  # v2 cluster MC pipeline + cache behavior
+├── Dockerfile             # Production container
+├── .env.template          # Env var template
+└── README.md              # This file
 ```
 
 ---
 
 ## Known Issues
 
-1. **Cross-network AnkiConnect** — if Anki and the quizzer are on different Docker networks, use the Anki container's host-published port (e.g. `http://192.168.1.x:8764`) instead of the container hostname.
+1. **Cross-network AnkiConnect** — if Anki and the quizzer are on different Docker networks, use the Anki container's host-published port (e.g. `http://192.168.1.x:8764`) instead of the container hostname. See [env-setup.md](references/env-setup.md).
 2. **Sub-minute scheduling** — AnkiConnect only supports day-granularity for `setDueDate`. "Again" and "Hard" use `days: "0"` which marks cards due immediately.
 3. **Cloudflare SSL** — if self-hosting behind Cloudflare, set SSL/TLS mode to "Full" or add an origin SSL certificate for the subdomain.
+4. **Reasoning-model latency** — cluster MC's first call on a reasoning model (MiniMax-M3) takes ~30–45s. Default `LLM_TIMEOUT_MS=30000` is too tight; bump to `90000`.
+5. **Reasoning-model JSON parsing** — reasoning models emit `<think>...</think>` blocks even with `response_format=json_object`. `lib/llm.js` strips them before parsing; if you swap providers and this regresses, check that strip first.

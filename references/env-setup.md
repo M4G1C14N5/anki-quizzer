@@ -67,3 +67,23 @@ When in MC mode, the quizzer generates wrong answers by pulling from the **backs
 - The more cards in the deck, the better the MC experience
 
 For best MC results, decks should have at least 20+ cards.
+
+---
+
+## LLM Environment Variables (v2)
+
+Required for **session mode** and **LLM cluster MC** generation. Uses an OpenAI-compatible chat-completions endpoint.
+
+| Var               | Required for        | Default                       |
+|-------------------|---------------------|-------------------------------|
+| `LLM_API_KEY`     | session + cluster   | **required** for both modes   |
+| `LLM_BASE_URL`    | both modes          | `https://api.minimax.io/v1` |
+| `LLM_MODEL`       | both modes          | `MiniMax-M3`                 |
+| `LLM_CACHE_DIR`   | cluster mode        | `./data/llm-cache`           |
+| `LLM_TIMEOUT_MS`  | both modes          | `30000`                       |
+
+**Reasoning-model note:** if `LLM_MODEL` is a reasoning model (e.g. MiniMax-M3), bump `LLM_TIMEOUT_MS` to `90000`. Cluster generation for a 12-card cluster takes ~29s — at the 30s default it times out sporadically.
+
+**Cache:** cluster MC writes per-cluster results to `${LLM_CACHE_DIR}/clusters.json` (keyed by content hash). Bump-and-prune via `POST /api/llm-cache/clear`.
+
+See `references/llm-cluster-mc.md` for cluster cache details and `references/session-mode.md` for session-mode behavior.
