@@ -18,15 +18,34 @@
 <main>
   <!-- SETUP SCREEN -->
   <section id="setup" class="screen active">
-    <h2>Pick a deck</h2>
-    <div class="deck-row">
-      <select id="deck-select" disabled>
-        <option>Loading decks…</option>
-      </select>
-      <button id="refresh-decks" class="ghost" title="Refresh deck list">↻</button>
+    <h2>Session type</h2>
+    <div class="session-row">
+      <label class="session-option">
+        <input type="radio" name="session-type" value="daily" checked>
+        <span class="session-card">
+          <strong>Daily review</strong>
+          <span class="session-desc">Random cards from your Anki deck.</span>
+        </span>
+      </label>
+      <label class="session-option">
+        <input type="radio" name="session-type" value="cluster">
+        <span class="session-card">
+          <strong>Cluster session</strong>
+          <span class="session-desc">AI-generated questions grouped by concept. Requires summary + memory.</span>
+        </span>
+      </label>
     </div>
 
-    <h2>How many questions?</h2>
+    <div id="daily-options">
+      <h2>Pick a deck</h2>
+      <div class="deck-row">
+        <select id="deck-select" disabled>
+          <option>Loading decks…</option>
+        </select>
+        <button id="refresh-decks" class="ghost" title="Refresh deck list">↻</button>
+      </div>
+
+      <h2>How many questions?</h2>
     <div class="count-row">
       <input type="range" id="count-slider" min="1" max="20" value="10">
       <output id="count-value">10</output>
@@ -50,6 +69,16 @@
       </label>
     </div>
 
+    </div>
+
+    <div id="cluster-options" class="hidden">
+      <h2>Summary <span class="muted small">(paste your study notes or topic list)</span></h2>
+      <textarea id="session-summary" rows="4" placeholder="e.g. Docker networking: bridge, host, overlay networks, DNS resolution, container communication…"></textarea>
+
+      <h2>Memory <span class="muted small">(optional context from past sessions)</span></h2>
+      <textarea id="session-memory" rows="3" placeholder="e.g. User struggles with overlay network concepts — revisit with diagrams…"></textarea>
+    </div>
+
     <div class="actions">
       <button id="start-btn" class="primary" disabled>Start quiz</button>
     </div>
@@ -70,6 +99,7 @@
     </div>
 
     <article class="card">
+      <div class="concept-label hidden" id="concept-label"></div>
       <div class="card-side front" id="card-front"></div>
       <div class="card-side back hidden" id="card-back"></div>
     </article>
@@ -79,6 +109,7 @@
     </div>
 
     <div class="mc-options hidden" id="mc-options"></div>
+    <div class="mc-explanations hidden" id="mc-explanations"></div>
 
     <div class="mc-feedback hidden" id="mc-feedback"></div>
 

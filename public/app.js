@@ -14,7 +14,9 @@ const state = {
   deck: null,
   count: 10,
   mode: 'recall', // 'recall' | 'mc'
-  cards: [],
+  sessionType: 'daily', // 'daily' | 'cluster'
+  cards: [],       // normal quiz: [{id, front, back, options, cluster}...]
+  // cluster/session-quiz mode: flattened to [{id, front, back, options, cluster:{title}}...]
   idx: 0,
   revealed: false,
   mcAnswered: false, // MC mode: have we already picked an option for this card?
@@ -112,6 +114,26 @@ for (const r of document.querySelectorAll('input[name="quiz-mode"]')) {
   });
 }
 
+// Session type (daily review vs cluster session)
+for (const r of document.querySelectorAll('input[name="session-type"]')) {
+  r.addEventListener('change', (e) => {
+    state.sessionType = e.target.value;
+    const isCluster = state.sessionType === 'cluster';
+    $('daily-options').classList.toggle('hidden', isCluster);
+    $('cluster-options').classList.toggle('hidden', !isCluster);
+    // Cluster mode uses MC-style questions and doesn't need Anki decks
+    if (isCluster) {
+      const mcRadio = document.querySelector('input[name="quiz-mode"][value="mc"]');
+      if (mcRadio) mcRadio.checked = true;
+      state.mode = 'mc';
+      $('start-btn').disabled = false;
+    } else {
+      // Daily mode: only enable if decks have loaded
+      $('start-btn').disabled = !state.decks.length;
+    }
+  });
+}
+
 // --- Quiz flow ---------------------------------------------------------
 
 function showScreen(name) {
@@ -126,6 +148,7 @@ function setModeUI() {
   $('show-answer').classList.toggle('hidden', isMC);
   $('mc-options').classList.toggle('hidden', !isMC);
   $('mc-feedback').classList.add('hidden'); // reset; shown after pick
+  $('mc-explanations').classList.add('hidden'); // reset; shown after pick
   // Rating buttons are ONLY for recall mode. MC mode uses correct/incorrect scoring.
   $('rate-actions').classList.toggle('hidden', isMC);
   $('hotkeys-recall').classList.toggle('hidden', isMC);
@@ -145,16 +168,53 @@ async function startQuiz() {
   $('start-btn').disabled = true;
   $('start-btn').textContent = 'Loading cards…';
   try {
-    const data = await api('/api/quiz', {
-      method: 'POST',
-      body: JSON.stringify({ deck: state.deck, count: state.count, mode: state.mode }),
-    });
-    state.cards = data.cards || [];
-    if (!state.cards.length) {
-      alert(data.message || 'No cards found in this deck.');
-      $('start-btn').disabled = false;
-      $('start-btn').textContent = 'Start quiz';
-      return;
+    if (state.sessionType === 'cluster') {
+      // Cluster session — call /api/session-quiz
+      const summary = $('session-summary').value.trim();
+      const memory = $('session-memory').value.trim();
+      const data = await api('/api/session-quiz', {
+        method: 'POST',
+        body: JSON.stringify({ summary, memory }),
+      });
+      // Flatten concepts into a flat cards array for uniform rendering
+      const cards = [];
+      for (const concept of (data.concepts || [])) {
+        for (const q of (concept.quiz || [])) {
+          cards.push({
+            id: `session-${cards.length}`,
+            front: q.question || '(no question)',
+            back: (q.options || []).find((o) => o.isCorrect)?.text || '',
+            options: (q.options || []).map((o) => ({
+              label: o.label,
+              text: o.text,
+              isCorrect: !!o.isCorrect,
+              explanation: o.explanation || null,
+            })),
+            cluster: { title: concept.title },
+          });
+        }
+      }
+      if (!cards.length) {
+        alert(data.error || 'No questions generated. Try different summary text.');
+        $('start-btn').disabled = false;
+        $('start-btn').textContent = 'Start quiz';
+        return;
+      }
+      state.cards = cards;
+      state.mode = 'mc'; // session-quiz is always MC-style
+    } else {
+      // Daily review — call /api/quiz
+      const data = await api('/api/quiz', {
+        method: 'POST',
+        body: JSON.stringify({ deck: state.deck, count: state.count, mode: state.mode }),
+      });
+      state.cards = data.cards || [];
+      if (!state.cards.length) {
+        alert(data.message || 'No cards found in this deck.');
+        $('start-btn').disabled = false;
+        $('start-btn').textContent = 'Start quiz';
+        return;
+      }
     }
     showScreen('quiz');
     renderCard();
@@ -172,6 +232,15 @@ function renderCard() {
   $('q-index').textContent = state.idx + 1;
   $('q-total').textContent = state.cards.length;
   $('deck-label').textContent = c.deckName || state.deck;
+
+  // Concept label (cluster/session-quiz mode)
+  const conceptLabel = $('concept-label');
+  if (c.cluster && c.cluster.title) {
+    conceptLabel.textContent = c.cluster.title;
+    conceptLabel.classList.remove('hidden');
+  } else {
+    conceptLabel.classList.add('hidden');
+  }
 
   $('card-front').textContent = c.front || '(empty)';
   $('card-back').textContent = c.back || '(empty)';
@@ -211,8 +280,10 @@ function pickMCOption(btn, opt) {
   state.mcAnswered = true;
   state.mcPicked = opt;
 
-  // Mark all options: correct one green, picked-wrong one red, others dim.
   const container = $('mc-options');
+  const card = state.cards[state.idx];
+
+  // Mark all options: correct one green, picked-wrong one red, others dim.
   for (const b of container.querySelectorAll('.mc-option')) {
     const isCorrect = b.dataset.correct === 'true';
     b.disabled = true;
@@ -238,8 +309,10 @@ function pickMCOption(btn, opt) {
   // Reveal back side too so user can compare with full back content.
   $('card-back').classList.remove('hidden');
 
+  // Show explanations for all options.
+  renderMCExplanations(card.options, opt.label);
+
   // Record the result immediately (no rating step in MC mode).
-  const card = state.cards[state.idx];
   state.results.push({
     id: card.id,
     correct: !!opt.isCorrect,
@@ -251,9 +324,10 @@ function pickMCOption(btn, opt) {
     interval: card.interval,
     ease: card.ease,
     mode: 'mc',
+    sessionType: state.sessionType,
   });
 
-  // Auto-advance after 1.5s (per spec).
+  // Auto-advance after 2s (slightly longer to let user read explanations).
   setTimeout(() => {
     state.idx++;
     if (state.idx >= state.cards.length) {
@@ -261,7 +335,39 @@ function pickMCOption(btn, opt) {
     } else {
       renderCard();
     }
-  }, 1500);
+  }, 2000);
+}
+
+function renderMCExplanations(options, pickedLabel) {
+  const container = $('mc-explanations');
+  container.innerHTML = '';
+  container.classList.remove('hidden');
+
+  if (!Array.isArray(options)) return;
+
+  for (const opt of options) {
+    const item = document.createElement('div');
+    const isCorrect = !!opt.isCorrect;
+    const isPicked = opt.label === pickedLabel;
+    item.className = `mc-explanation-item${isCorrect ? ' is-correct' : isPicked ? ' is-wrong' : ''}`;
+
+    const label = document.createElement('span');
+    label.className = 'mc-ex-label';
+    label.textContent = opt.label;
+
+    const text = document.createElement('span');
+    text.className = 'mc-ex-text';
+    if (opt.explanation) {
+      text.textContent = opt.explanation;
+    } else {
+      text.textContent = '(No explanation available)';
+      text.style.fontStyle = 'italic';
+    }
+
+    item.appendChild(label);
+    item.appendChild(text);
+    container.appendChild(item);
+  }
 }
 
 $('show-answer').addEventListener('click', () => {
@@ -300,6 +406,13 @@ function rate(rating) {
 async function finishQuiz() {
   showScreen('results');
   renderResults();
+
+  // Session-quiz mode has no Anki cards to schedule — skip /api/finish.
+  if (state.sessionType === 'cluster') {
+    $('schedule-status').textContent = 'ℹ Cluster sessions generate AI questions — no Anki scheduling needed.';
+    return;
+  }
+
   // Send to backend to schedule.
   try {
     const payload = state.mode === 'mc'
@@ -356,7 +469,12 @@ function renderResults() {
     }
   }
 
-  if (state.mode === 'mc') {
+  if (state.sessionType === 'cluster') {
+    const correct = counts.correct;
+    $('score-detail').innerHTML =
+      `<strong>${correct}</strong> of <strong>${total}</strong> answered correctly<br>` +
+      `<strong>Cluster session</strong>`;
+  } else if (state.mode === 'mc') {
     const correct = counts.correct;
     $('score-detail').innerHTML =
       `<strong>${correct}</strong> of <strong>${total}</strong> answered correctly<br>` +
@@ -396,12 +514,21 @@ function renderResults() {
     if (state.mode === 'mc') {
       const tagClass = r.correct ? 'good' : 'again';
       const tagLabel = r.correct ? '✓' : '✗';
+      const isSession = r.sessionType === 'cluster';
+      let metaHtml;
+      if (isSession) {
+        metaHtml = r.pickedLabel ? `<div class="meta-line">You picked <strong>${escapeHtml(r.pickedLabel)}</strong></div>` : '';
+      } else {
+        metaHtml = r.pickedLabel
+          ? `<div class="meta-line">You picked <strong>${escapeHtml(r.pickedLabel)}</strong> · card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>`
+          : `<div class="meta-line">card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>`;
+      }
       li.innerHTML = `
         <div class="rating-tag ${tagClass}">${tagLabel}</div>
         <div>
           <div class="q">${escapeHtml(r.front)}</div>
           <div class="a">${escapeHtml(r.back)}</div>
-          ${r.pickedLabel ? `<div class="meta-line">You picked <strong>${escapeHtml(r.pickedLabel)}</strong> · card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>` : `<div class="meta-line">card #${r.id} · ${escapeHtml(r.deck)} · interval ${r.interval}d · ease ${(r.ease/1000).toFixed(2)}</div>`}
+          ${metaHtml}
         </div>`;
     } else {
       li.innerHTML = `
@@ -425,6 +552,12 @@ function escapeHtml(s) {
 $('restart-btn').addEventListener('click', () => {
   $('start-btn').disabled = false;
   $('start-btn').textContent = 'Start quiz';
+  // Reset session type to daily for next run
+  state.sessionType = 'daily';
+  const dailyRadio = document.querySelector('input[name="session-type"][value="daily"]');
+  if (dailyRadio) dailyRadio.checked = true;
+  $('daily-options').classList.remove('hidden');
+  $('cluster-options').classList.add('hidden');
   showScreen('setup');
 });
 
