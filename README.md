@@ -16,7 +16,7 @@ Deploy anywhere with Docker.
   - **Session** — generate a fresh quiz from pasted summary + memory, no deck required (see [session-mode.md](references/session-mode.md))
 - **Automatic Anki scheduling** — quiz results reschedule cards via AnkiConnect (`setDueDate` + ease adjustment)
 - **Deck picker** — fetches live deck list from Anki
-- **Quiz history** — persisted locally (JSONL), browsable via the app
+- **Quiz history** — persisted locally (JSONL); in-app browser coming soon
 - **Hotkeys** — Space to reveal, 1–4 to rate
 - **Single binary deploy** — one Dockerfile, no build step for the frontend
 
