@@ -158,7 +158,7 @@ is LAN-only via Coolify. Documented inline; revisit before any public exposure.
 |-------------------|-------------------|-------------------------------|
 | `LLM_API_KEY`     | session + cluster | **required** for both modes   |
 | `LLM_BASE_URL`    | both modes        | `https://api.minimax.io/v1` |
-| `LLM_MODEL`       | both modes        | `minimax/MiniMax-M3`         |
+| `LLM_MODEL`       | both modes        | `MiniMax-M3`                 |
 | `LLM_CACHE_DIR`   | cluster mode      | `./data/llm-cache`           |
 | `LLM_TIMEOUT_MS`  | both modes        | `30000`                       |
 
