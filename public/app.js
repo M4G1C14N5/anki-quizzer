@@ -561,6 +561,33 @@ $('restart-btn').addEventListener('click', () => {
   showScreen('setup');
 });
 
+// End the current quiz early and bail out to setup without scheduling.
+function endQuiz() {
+  // Cancel any pending MC auto-advance so the timer can't fire after we've left the screen.
+  state.cards = [];
+  state.idx = 0;
+  state.results = [];
+  state.revealed = false;
+  state.mcAnswered = false;
+  state.mcPicked = null;
+  // Hide transient quiz UI.
+  $('card-back').classList.add('hidden');
+  $('show-answer').classList.remove('hidden');
+  $('rate-actions').classList.add('hidden');
+  $('mc-feedback').classList.add('hidden');
+  $('mc-feedback').textContent = '';
+  $('mc-explanations').classList.add('hidden');
+  $('mc-explanations').innerHTML = '';
+  const mcOpts = $('mc-options');
+  mcOpts.innerHTML = '';
+  mcOpts.classList.add('hidden');
+  // Restore start button so the user can launch a new quiz from setup.
+  $('start-btn').disabled = !state.decks.length;
+  $('start-btn').textContent = 'Start quiz';
+  showScreen('setup');
+}
+$('end-quiz').addEventListener('click', endQuiz);
+
 // --- Hotkeys -----------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {

@@ -500,3 +500,26 @@ textarea::placeholder { color: var(--muted); }
   border-color: rgba(239, 68, 68, 0.35);
 }
 .mc-explanation-item.is-wrong .mc-ex-label { color: var(--again); }
+
+/* --- End Quiz button (danger action) --------------------------------- */
+.end-quiz-row {
+  justify-content: center;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+button.end-quiz {
+  background: var(--again);
+  color: #fff;
+  border-color: var(--again);
+  font-weight: 600;
+  padding: 0.75rem 1.5rem;
+  min-width: 8rem;
+}
+button.end-quiz:hover:not(:disabled) {
+  background: #dc2626;
+  border-color: #dc2626;
+}
+button.end-quiz:disabled {
+  opacity: 0.45;
+}
