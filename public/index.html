@@ -9,6 +9,10 @@
 <body>
 <header>
   <a href="/"><h1>🃏 Anki Quizzer</h1></a>
+  <nav class="header-nav">
+    <button type="button" class="nav-btn" data-nav="setup">New quiz</button>
+    <button type="button" class="nav-btn" data-nav="history">History</button>
+  </nav>
   <div class="status" id="status">
     <span id="status-dot" class="dot"></span>
     <span id="status-text">checking Anki…</span>
@@ -148,9 +152,41 @@
 
     <div class="actions">
       <button id="restart-btn" class="primary">New quiz</button>
+      <button id="view-history-btn" class="ghost" type="button">View history</button>
     </div>
 
     <div id="schedule-status" class="muted small"></div>
+  </section>
+
+  <!-- HISTORY SCREEN -->
+  <section id="history" class="screen">
+    <h2>Quiz history</h2>
+
+    <div id="history-list-wrap">
+      <p class="muted small" id="history-loading">Loading…</p>
+      <ol class="history-list" id="history-list"></ol>
+      <p class="muted small hidden" id="history-empty">No past quizzes yet. Finish a quiz to see it here.</p>
+    </div>
+
+    <div id="history-detail-wrap" class="hidden">
+      <div class="history-detail-header">
+        <button id="history-back-btn" class="ghost" type="button">← Back to list</button>
+        <button id="history-retake-btn" class="primary" type="button">Retake this quiz</button>
+      </div>
+      <div class="score-row">
+        <div class="score-big" id="history-score-big">0%</div>
+        <div class="score-detail" id="history-score-detail"></div>
+      </div>
+      <div class="cluster-bg hidden" id="history-cluster-bg">
+        <h3>Cluster background</h3>
+        <p id="history-cluster-bg-text"></p>
+        <h3>Intuition</h3>
+        <p id="history-cluster-intuition-text"></p>
+      </div>
+      <h3>Questions</h3>
+      <ol class="card-list" id="history-card-list"></ol>
+      <p class="muted small hidden" id="history-no-quiz-payload">This older quiz didn't save its questions. Only the score is available above.</p>
+    </div>
   </section>
 </main>
 

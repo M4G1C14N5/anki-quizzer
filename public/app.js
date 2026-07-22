@@ -6,6 +6,7 @@ const screens = {
   setup: $('setup'),
   quiz: $('quiz'),
   results: $('results'),
+  history: $('history'),
 };
 
 const state = {
@@ -415,16 +416,28 @@ async function finishQuiz() {
 
   // Send to backend to schedule.
   try {
+    // Capture the questions so the history view can replay the quiz without
+    // re-fetching from Anki. Keep the front/back/options/cluster fields.
+    const quizPayload = state.cards.map((c) => ({
+      id: c.id,
+      front: c.front,
+      back: c.back,
+      deckName: c.deckName || state.deck,
+      options: c.options || null,
+      cluster: c.cluster || null,
+    }));
     const payload = state.mode === 'mc'
       ? {
           deck: state.deck,
           count: state.cards.length,
           mode: 'mc',
-          results: state.results.map(({ id, correct }) => ({ id, correct })),
+          quiz: quizPayload,
+          results: state.results.map(({ id, correct, pickedLabel, sessionType }) => ({ id, correct, pickedLabel, sessionType })),
         }
       : {
           deck: state.deck,
           count: state.cards.length,
+          quiz: quizPayload,
           results: state.results.map(({ id, rating }) => ({ id, rating })),
         };
     const r = await api('/api/finish', {
@@ -637,6 +650,242 @@ document.addEventListener('keydown', (e) => {
     if (btn) btn.click();
   }
 });
+
+// --- Boot --------------------------------------------------------------
+// --- History ----------------------------------------------------------
+
+// State for the history detail view (separate from the live quiz state).
+const historyState = {
+  entries: [],   // list-view entries from /api/history
+  detail: null,  // full entry from /api/history/:index
+  index: null,   // index of the entry being viewed
+};
+
+// Header nav buttons: "New quiz" + "History"
+document.querySelectorAll('.nav-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const target = btn.getAttribute('data-nav');
+    if (target === 'history') openHistoryList();
+    else showScreen('setup');
+  });
+});
+
+// "View history" button on the results screen.
+const viewHistoryBtn = $('view-history-btn');
+if (viewHistoryBtn) {
+  viewHistoryBtn.addEventListener('click', () => openHistoryList());
+}
+
+const historyBackBtn = $('history-back-btn');
+if (historyBackBtn) {
+  historyBackBtn.addEventListener('click', () => openHistoryList());
+}
+
+const historyRetakeBtn = $('history-retake-btn');
+if (historyRetakeBtn) {
+  historyRetakeBtn.addEventListener('click', () => retakeFromHistory());
+}
+
+async function openHistoryList() {
+  showScreen('history');
+  $('history-list-wrap').classList.remove('hidden');
+  $('history-detail-wrap').classList.add('hidden');
+  $('history-loading').classList.remove('hidden');
+  $('history-list').innerHTML = '';
+  $('history-empty').classList.add('hidden');
+
+  try {
+    const { count, history } = await api('/api/history');
+    historyState.entries = history || [];
+    $('history-loading').classList.add('hidden');
+    if (!historyState.entries.length) {
+      $('history-empty').classList.remove('hidden');
+      return;
+    }
+    renderHistoryList();
+  } catch (e) {
+    $('history-loading').textContent = `⚠ Failed to load history: ${e.message}`;
+  }
+}
+
+function renderHistoryList() {
+  const list = $('history-list');
+  list.innerHTML = '';
+  // Newest first.
+  const entries = historyState.entries.slice().reverse();
+  for (const e of entries) {
+    const li = document.createElement('li');
+    li.className = 'history-row';
+    li.tabIndex = 0;
+    const date = new Date(e.finishedAt);
+    const dateLabel = date.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+    const counts = e.byRating || {};
+    let countsHtml = '';
+    if (e.mode === 'mc') {
+      countsHtml = `<span class="pill-mini good">✓ ${counts.correct || 0}</span> ` +
+                   `<span class="pill-mini again">✗ ${counts.incorrect || 0}</span>`;
+    } else {
+      const order = ['again', 'hard', 'good', 'easy'];
+      countsHtml = order
+        .filter((k) => counts[k])
+        .map((k) => `<span class="pill-mini ${k}">${counts[k]} ${k}</span>`)
+        .join(' ');
+    }
+    li.innerHTML = `
+      <div class="history-row-main">
+        <div class="history-row-score">${e.score ?? 0}%</div>
+        <div>
+          <div class="history-row-title">
+            <strong>${escapeHtml(e.deck)}</strong>
+            <span class="muted small">${e.mode === 'mc' ? 'Multiple choice' : 'Recall'}</span>
+            ${e.hasQuiz ? '' : '<span class="muted small" title="No quiz payload saved for this older entry">(no questions)</span>'}
+          </div>
+          <div class="history-row-meta muted small">${dateLabel} · ${e.answered}/${e.requested} answered</div>
+        </div>
+        <div class="history-row-counts">${countsHtml}</div>
+      </div>`;
+    li.addEventListener('click', () => openHistoryDetail(e.index));
+    li.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        openHistoryDetail(e.index);
+      }
+    });
+    list.appendChild(li);
+  }
+}
+
+async function openHistoryDetail(index) {
+  showScreen('history');
+  $('history-list-wrap').classList.add('hidden');
+  $('history-detail-wrap').classList.remove('hidden');
+  $('history-retake-btn').disabled = true;
+  $('history-score-big').textContent = '…';
+  $('history-score-detail').textContent = 'Loading…';
+  $('history-card-list').innerHTML = '';
+  $('history-cluster-bg').classList.add('hidden');
+  $('history-no-quiz-payload').classList.add('hidden');
+
+  try {
+    const entry = await api(`/api/history/${index}`);
+    historyState.detail = entry;
+    historyState.index = index;
+    renderHistoryDetail(entry);
+    $('history-retake-btn').disabled = false;
+  } catch (e) {
+    $('history-score-detail').textContent = `⚠ Failed to load: ${e.message}`;
+  }
+}
+
+function renderHistoryDetail(entry) {
+  $('history-score-big').textContent = `${entry.score ?? 0}%`;
+  const when = new Date(entry.finishedAt).toLocaleString();
+  $('history-score-detail').innerHTML =
+    `<strong>${escapeHtml(entry.deck)}</strong> · ${entry.mode === 'mc' ? 'MC' : 'Recall'} · ${escapeHtml(when)}<br>` +
+    `${entry.answered}/${entry.requested} answered`;
+
+  const list = $('history-card-list');
+  list.innerHTML = '';
+  const quiz = entry.quiz || [];
+  const results = entry.results || [];
+  const resultById = new Map();
+  for (const r of results) resultById.set(String(r.id), r);
+
+  if (!quiz.length) {
+    $('history-no-quiz-payload').classList.remove('hidden');
+    return;
+  }
+
+  // Pick the cluster background from the first quiz entry (cluster is shared).
+  const firstCluster = quiz.find((q) => q.cluster && (q.cluster.background || q.cluster.intuition))?.cluster;
+  if (firstCluster) {
+    $('history-cluster-bg').classList.remove('hidden');
+    $('history-cluster-bg-text').textContent = firstCluster.background || '(no background saved)';
+    $('history-cluster-intuition-text').textContent = firstCluster.intuition || '(no intuition saved)';
+  }
+
+  quiz.forEach((q, i) => {
+    const r = resultById.get(String(q.id)) || {};
+    const li = document.createElement('li');
+
+    if (entry.mode === 'mc') {
+      const tagClass = r.correct ? 'good' : 'again';
+      const tagLabel = r.correct ? '✓' : '✗';
+      const optionsHtml = (q.options || []).map((o) => {
+        const isPick = o.label === r.pickedLabel;
+        const isCorrect = o.isCorrect;
+        const cls = ['mc-option-static'];
+        if (isCorrect) cls.push('correct');
+        if (isPick && !isCorrect) cls.push('wrong-pick');
+        const mark = isCorrect ? ' ✓' : (isPick ? ' ✗ (your pick)' : '');
+        return `<div class="${cls.join(' ')}"><strong>${escapeHtml(o.label)}.</strong> ${escapeHtml(o.text)}${escapeHtml(mark)}</div>`;
+      }).join('');
+      li.innerHTML = `
+        <div class="rating-tag ${tagClass}">${tagLabel}</div>
+        <div>
+          <div class="q">${i + 1}. ${escapeHtml(q.front)}</div>
+          <div class="mc-options-static">${optionsHtml}</div>
+          ${r.pickedLabel ? `<div class="meta-line">You picked <strong>${escapeHtml(r.pickedLabel)}</strong></div>` : '<div class="meta-line muted">(no answer recorded)</div>'}
+          <div class="meta-line muted small">card #${escapeHtml(String(q.id))} · ${escapeHtml(q.deckName || entry.deck)}</div>
+        </div>`;
+    } else {
+      const rating = r.rating || 'again';
+      li.innerHTML = `
+        <div class="rating-tag ${rating}">${escapeHtml(rating)}</div>
+        <div>
+          <div class="q">${i + 1}. ${escapeHtml(q.front)}</div>
+          <div class="a">${escapeHtml(q.back)}</div>
+          <div class="meta-line muted small">card #${escapeHtml(String(q.id))} · ${escapeHtml(q.deckName || entry.deck)}</div>
+        </div>`;
+    }
+    list.appendChild(li);
+  });
+}
+
+// Retake: rebuild the same setup (deck, mode, count) and start a fresh quiz.
+// New cluster session is generated; questions will differ if the cluster LLM
+// changes. For deterministic re-runs we'd need to persist the original
+// cardIds; for now this is a "same shape, fresh questions" retake.
+async function retakeFromHistory() {
+  const entry = historyState.detail;
+  if (!entry) return;
+
+  // Make sure decks are loaded so the deck-select dropdown is populated.
+  if (!state.decks.length) await loadDecks();
+
+  // Switch to setup screen and pre-fill the form.
+  state.sessionType = 'daily';
+  const dailyRadio = document.querySelector('input[name="session-type"][value="daily"]');
+  if (dailyRadio) dailyRadio.checked = true;
+  $('daily-options').classList.remove('hidden');
+  $('cluster-options').classList.add('hidden');
+
+  state.mode = entry.mode === 'mc' ? 'mc' : 'recall';
+  const modeRadio = document.querySelector(`input[name="quiz-mode"][value="${state.mode}"]`);
+  if (modeRadio) modeRadio.checked = true;
+  setModeUI();
+
+  // Set deck + count
+  if (entry.deck && entry.deck !== 'All') {
+    const sel = $('deck-select');
+    if (state.decks.includes(entry.deck)) {
+      sel.value = entry.deck;
+      state.deck = entry.deck;
+    }
+  }
+  const targetCount = entry.requested || entry.answered || 10;
+  const slider = $('count-slider');
+  slider.value = String(Math.max(1, Math.min(20, targetCount)));
+  $('count-value').textContent = slider.value;
+  state.count = parseInt(slider.value, 10);
+
+  showScreen('setup');
+  // Kick off the quiz automatically.
+  await startQuiz();
+}
 
 // --- Boot --------------------------------------------------------------
 

@@ -20,10 +20,13 @@
 //                               LLM_API_KEY, falls back to distractor-from-backs.
 //   POST /api/session-quiz {summary, memory}
 //        -> { concepts: [{title, background, intuition, quiz:[...5 MCQs]}] }
-//   POST /api/finish {deck, count, mode, results:[...]}
+//   POST /api/finish {deck, count, mode, results:[...], quiz?:[...]}
 //        -> schedules via setDueDate + setEaseFactors; returns { saved, scheduled }
+//        Persists the full quiz payload (questions, options, cluster bg) so
+//        the history view can replay the quiz without re-fetching from Anki.
 //   GET  /api/last-results        -> last quiz summary
-//   GET  /api/history             -> { count, history: [...] }
+//   GET  /api/history             -> { count, history: [...] } (list view, no quiz payload)
+//   GET  /api/history/:index      -> single history entry with full quiz payload
 //   POST /api/llm-cache/clear     -> wipe cluster-cache file (LAN-only auth)
 //   GET  /                        -> static public/index.html
 
@@ -504,7 +507,7 @@ app.post('/api/llm-cache/clear', async (_req, res) => {
 
 app.post('/api/finish', async (req, res, next) => {
   try {
-    const { deck, count, mode, results } = req.body || {};
+    const { deck, count, mode, results, quiz } = req.body || {};
     if (!Array.isArray(results) || !results.length) {
       return res.status(400).json({ error: 'results must be a non-empty array' });
     }
@@ -585,6 +588,9 @@ app.post('/api/finish', async (req, res, next) => {
       ),
       scheduled,
       failures,
+      // Persist the full quiz payload (questions, options, cluster background)
+      // so the history view can replay the quiz without re-fetching from Anki.
+      quiz: Array.isArray(quiz) ? quiz : null,
       results,
     };
 
@@ -607,7 +613,39 @@ app.get('/api/history', async (_req, res) => {
   try {
     const buf = await fsp.readFile(HISTORY, 'utf8').catch(() => '');
     const lines = buf.split('\n').filter(Boolean);
-    res.json({ count: lines.length, history: lines.map((l) => JSON.parse(l)) });
+    const entries = lines.map((l) => JSON.parse(l));
+    // List view: drop the heavy `quiz` payload and `results` to keep the
+    // response small. Detail view re-fetches by index.
+    const summary = entries.map((e, i) => ({
+      index: i,
+      finishedAt: e.finishedAt,
+      deck: e.deck,
+      mode: e.mode,
+      requested: e.requested,
+      answered: e.answered,
+      score: e.score,
+      byRating: e.byRating,
+      hasQuiz: !!e.quiz,
+    }));
+    res.json({ count: entries.length, history: summary });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/history/:index — full quiz payload for one past session, including
+// the original questions, options, cluster background, and Tom's picks.
+app.get('/api/history/:index', async (req, res) => {
+  try {
+    const idx = parseInt(req.params.index, 10);
+    if (!Number.isFinite(idx) || idx < 0) {
+      return res.status(400).json({ error: 'index must be a non-negative integer' });
+    }
+    const buf = await fsp.readFile(HISTORY, 'utf8').catch(() => '');
+    const lines = buf.split('\n').filter(Boolean);
+    if (idx >= lines.length) {
+      return res.status(404).json({ error: `no history entry at index ${idx} (have ${lines.length})` });
+    }
+    const entry = JSON.parse(lines[idx]);
+    res.json({ index: idx, ...entry });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
