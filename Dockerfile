@@ -8,6 +8,7 @@ RUN npm install --omit=dev --no-audit --no-fund
 
 # App source
 COPY server.js ./
+COPY lib ./lib
 COPY public ./public
 
 ENV PORT=4318 \
