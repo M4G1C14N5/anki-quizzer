@@ -586,7 +586,22 @@ function endQuiz() {
   $('start-btn').textContent = 'Start quiz';
   showScreen('setup');
 }
-$('end-quiz').addEventListener('click', endQuiz);
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = $('end-quiz');
+  if (btn) {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      console.log('[anki-quizzer] end-quiz clicked');
+      try {
+        endQuiz();
+      } catch (err) {
+        console.error('[anki-quizzer] endQuiz error:', err);
+      }
+    });
+  } else {
+    console.warn('[anki-quizzer] end-quiz button not found');
+  }
+});
 
 // --- Hotkeys -----------------------------------------------------------
 
