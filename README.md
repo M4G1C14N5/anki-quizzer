@@ -4,6 +4,8 @@ A self-hosted quiz web app for Anki flashcards. Pick a deck, answer questions in
 
 Deploy anywhere with Docker.
 
+> Inspired by Geoffrey Litt — [Understanding is the new bottleneck](https://www.geoffreylitt.com/2026/07/02/understanding-is-the-new-bottleneck).
+
 ---
 
 ## Features
