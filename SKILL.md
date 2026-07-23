@@ -78,7 +78,7 @@ All endpoints are on the quizzer server (default `localhost:4318`).
 | POST   | `/api/quiz`           | Start quiz → returns cards       |
 | POST   | `/api/finish`         | Submit answers, reschedule cards |
 | GET    | `/api/history`         | Full quiz history (JSONL)        |
-| POST   | `/api/session-quiz`    | Generate MC quiz from session summary + memory |
+| POST   | `/api/session-quiz`    | Generate MC quiz from session goal + notes |
 | POST   | `/api/llm-cache/clear` | Wipe on-disk cluster cache       |
 
 ## Generation modes
@@ -92,7 +92,7 @@ chat-completions endpoint (defaults to MiniMax). The app must **not 500 when
 Body:
 
 ```json
-{ "summary": "<markdown>", "memory": "<markdown>" }
+{ "goal": "<markdown>", "notes": "<markdown>" }
 ```
 
 Response:

@@ -18,7 +18,7 @@
 //                           v2: grouped by primary tag, one LLM call per cluster,
 //                               rich distractors, content-hash cached. Without
 //                               LLM_API_KEY, falls back to distractor-from-backs.
-//   POST /api/session-quiz {summary, memory}
+//   POST /api/session-quiz {goal, notes}
 //        -> { concepts: [{title, background, intuition, quiz:[...5 MCQs]}] }
 //   POST /api/finish {deck, count, mode, results:[...], quiz?:[...]}
 //        -> schedules via setDueDate + setEaseFactors; returns { saved, scheduled }
@@ -119,8 +119,19 @@ function scheduleForRating(rating) {
   }
 }
 
+// Cluster/session-mode results carry synthetic IDs like "session-0" (set in
+// public/app.js startQuiz()). They have no Anki cardId, so skip scheduling
+// for them — but they still count toward score / byRating in the history
+// entry below. Also catch results tagged `sessionType: "cluster"` defensively,
+// in case the front-end ever sets the flag without the `session-` prefix.
+function isSyntheticResult(r) {
+  if (!r) return false;
+  if (r.sessionType === 'cluster') return true;
+  return typeof r.id === 'string' && r.id.startsWith('session-');
+}
+
 // --- v2 generation-mode helpers ----------------------------------------
-// /api/session-quiz: LLM generates 1–3 concepts from summary+memory with 5 MCQs each.
+// /api/session-quiz: LLM generates 1–3 concepts from goal+notes with 5 MCQs each.
 // /api/quiz?mode=mc (v2): group cards by primary tag, one LLM call per cluster,
 //   cache per-cluster results by content hash; fall back to distractor-from-backs
 //   (no explanations) if LLM_API_KEY is missing or the call fails.
@@ -452,10 +463,10 @@ app.post('/api/quiz', async (req, res, next) => {
 
 app.post('/api/session-quiz', async (req, res, next) => {
   try {
-    const summary = (req.body && req.body.summary) || '';
-    const memory = (req.body && req.body.memory) || '';
-    if (!summary.trim() && !memory.trim()) {
-      return res.status(400).json({ error: 'summary and memory are both empty' });
+    const goal = (req.body && req.body.goal) || '';
+    const notes = (req.body && req.body.notes) || '';
+    if (!goal.trim() && !notes.trim()) {
+      return res.status(400).json({ error: 'goal and notes are both empty' });
     }
     if (!process.env.LLM_API_KEY) {
       return res.status(503).json({
@@ -463,7 +474,7 @@ app.post('/api/session-quiz', async (req, res, next) => {
       });
     }
 
-    const userPrompt = fillSessionPrompt(summary, memory);
+    const userPrompt = fillSessionPrompt(goal, notes);
     const parsed = await callLLM({ userPrompt, expectJson: true });
 
     const rawConcepts = Array.isArray(parsed?.concepts) ? parsed.concepts : [];
@@ -513,6 +524,7 @@ app.post('/api/finish', async (req, res, next) => {
     }
 
     let scheduled = 0;
+    let skipped = 0;
     const failures = [];
 
     function ratingForResult(r) {
@@ -524,11 +536,22 @@ app.post('/api/finish', async (req, res, next) => {
       return RATINGS[rating] ? rating : null;
     }
 
+    // Cluster/session-mode results (synthetic IDs like "session-0" OR
+    // `sessionType: "cluster"`) are persisted to history but never sent to
+    // AnkiConnect — they have no real cardId. We filter at push time so
+    // the buckets below only contain real Anki IDs; `scheduled` then
+    // naturally reflects only real cards. Cluster entries still count
+    // toward `score` and `byRating` because those iterate `results`
+    // directly (not `byDays`).
     const byDays = new Map();
     const easeDeltas = [];
     for (const r of results) {
       const rating = ratingForResult(r);
       if (!rating) continue;
+      if (isSyntheticResult(r)) {
+        skipped++;
+        continue;
+      }
       const sched = scheduleForRating(rating);
       if (!sched) continue;
       if (!byDays.has(sched.days)) byDays.set(sched.days, []);
@@ -564,6 +587,11 @@ app.post('/api/finish', async (req, res, next) => {
         }
       }
     }
+
+    console.log(
+      `[finish] deck=${deck || 'All'} mode=${mode === 'mc' ? 'mc' : 'recall'}` +
+      ` scheduled=${scheduled} skipped=${skipped} (cluster/synthetic session IDs)`,
+    );
 
     const summary = {
       finishedAt: new Date().toISOString(),

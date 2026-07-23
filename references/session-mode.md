@@ -1,6 +1,6 @@
 # Session Mode
 
-Generates a multiple-choice quiz from a free-form session summary and optional memory context — no Anki deck required.
+Generates a multiple-choice quiz from a free-form session goal and optional notes context — no Anki deck required.
 
 **Endpoint:** `POST /api/session-quiz`
 
@@ -14,15 +14,15 @@ Generates a multiple-choice quiz from a free-form session summary and optional m
 
 ```json
 {
-  "summary": "Free-form markdown — what was studied/covered",
-  "memory": "Optional markdown — context from prior sessions"
+  "goal": "Free-form markdown — what was studied/covered",
+  "notes": "Optional markdown — context from prior sessions"
 }
 ```
 
-| Field     | Required | Description                                          |
-|-----------|----------|------------------------------------------------------|
-| `summary` | yes      | The material to quiz on. Markdown accepted.          |
-| `memory`  | no       | Cross-session context (e.g. "struggles with X").     |
+| Field    | Required | Description                                          |
+|----------|----------|------------------------------------------------------|
+| `goal`   | yes      | The material to quiz on. Markdown accepted.          |
+| `notes`  | no       | Cross-session context (e.g. "struggles with X").     |
 
 ## Response
 
@@ -58,7 +58,7 @@ Generates a multiple-choice quiz from a free-form session summary and optional m
 
 ## How it works
 
-1. Server builds a prompt from the summary + memory (template in `lib/prompts.js` → `SESSION_PROMPT`).
+1. Server builds a prompt from the goal + notes (template in `lib/prompts.js` → `SESSION_PROMPT`).
 2. Sends to the configured LLM via OpenAI-compatible chat completions.
 3. Strips `<think>...</think>` blocks (reasoning models emit them even with `response_format=json_object`).
 4. Parses + validates JSON shape, drops malformed entries, returns the rest.
@@ -75,4 +75,4 @@ with HTTP `503`. Session mode has no fallback — it's purely LLM-driven.
 
 ## Latency
 
-Reasoning models (e.g. MiniMax-M3) take ~30–45s for a typical summary. `LLM_TIMEOUT_MS` defaults to 30000; bump to 90000 if you see timeouts.
+Reasoning models (e.g. MiniMax-M3) take ~30–45s for a typical goal. `LLM_TIMEOUT_MS` defaults to 30000; bump to 90000 if you see timeouts.
