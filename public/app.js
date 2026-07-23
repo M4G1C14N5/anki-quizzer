@@ -39,6 +39,23 @@ async function api(path, opts = {}) {
   return body;
 }
 
+// --- Loading overlay -------------------------------------------------
+
+function showLoading(message, sub) {
+  $('loading-message').textContent = message || 'Loading…';
+  const subEl = $('loading-sub');
+  if (sub) {
+    subEl.textContent = sub;
+    subEl.classList.remove('hidden');
+  } else {
+    subEl.classList.add('hidden');
+  }
+  $('loading-overlay').classList.remove('hidden');
+}
+function hideLoading() {
+  $('loading-overlay').classList.add('hidden');
+}
+
 // --- Status / health ---------------------------------------------------
 
 async function refreshHealth() {
@@ -150,6 +167,7 @@ function setModeUI() {
   $('mc-options').classList.toggle('hidden', !isMC);
   $('mc-feedback').classList.add('hidden'); // reset; shown after pick
   $('mc-explanations').classList.add('hidden'); // reset; shown after pick
+  $('mc-next-actions').classList.add('hidden'); // reset; shown after MC pick
   // Rating buttons are ONLY for recall mode. MC mode uses correct/incorrect scoring.
   $('rate-actions').classList.toggle('hidden', isMC);
   $('hotkeys-recall').classList.toggle('hidden', isMC);
@@ -157,7 +175,7 @@ function setModeUI() {
 }
 
 async function startQuiz() {
-  state.deck = $('deck-select').value || 'All';
+  state.deck = state.sessionType === 'cluster' ? 'Notes' : ($('deck-select').value || 'All');
   state.count = parseInt(slider.value, 10);
   state.cards = [];
   state.idx = 0;
@@ -167,15 +185,21 @@ async function startQuiz() {
   state.mcPicked = null;
 
   $('start-btn').disabled = true;
-  $('start-btn').textContent = 'Loading cards…';
+  if (state.sessionType === 'cluster') {
+    showLoading('Generating questions from your notes…', 'Cluster mode calls the LLM — usually 30–60 seconds.');
+  } else if (state.mode === 'mc') {
+    showLoading('Generating multiple-choice questions…', 'Cold cache may take up to 90 seconds.');
+  } else {
+    showLoading('Loading cards…');
+  }
   try {
     if (state.sessionType === 'cluster') {
       // Cluster session — call /api/session-quiz
-      const summary = $('session-summary').value.trim();
-      const memory = $('session-memory').value.trim();
+      const goal = $('session-goal').value.trim();
+      const notes = $('session-notes').value.trim();
       const data = await api('/api/session-quiz', {
         method: 'POST',
-        body: JSON.stringify({ summary, memory }),
+        body: JSON.stringify({ goal, notes }),
       });
       // Flatten concepts into a flat cards array for uniform rendering
       const cards = [];
@@ -196,7 +220,8 @@ async function startQuiz() {
         }
       }
       if (!cards.length) {
-        alert(data.error || 'No questions generated. Try different summary text.');
+        alert(data.error || 'No questions generated. Try different notes.');
+        hideLoading();
         $('start-btn').disabled = false;
         $('start-btn').textContent = 'Start quiz';
         return;
@@ -212,15 +237,18 @@ async function startQuiz() {
       state.cards = data.cards || [];
       if (!state.cards.length) {
         alert(data.message || 'No cards found in this deck.');
+        hideLoading();
         $('start-btn').disabled = false;
         $('start-btn').textContent = 'Start quiz';
         return;
       }
     }
+    hideLoading();
     showScreen('quiz');
     renderCard();
   } catch (e) {
     alert(`Failed to load cards: ${e.message}`);
+    hideLoading();
     $('start-btn').disabled = false;
     $('start-btn').textContent = 'Start quiz';
   }
@@ -328,15 +356,24 @@ function pickMCOption(btn, opt) {
     sessionType: state.sessionType,
   });
 
-  // Auto-advance after 2s (slightly longer to let user read explanations).
-  setTimeout(() => {
-    state.idx++;
-    if (state.idx >= state.cards.length) {
-      finishQuiz();
-    } else {
-      renderCard();
-    }
-  }, 2000);
+  // Show the "Next" button — user advances manually instead of timer.
+  $('mc-next-actions').classList.remove('hidden');
+}
+
+// Advance to the next card (or finish) when the user clicks "Next" or hits Enter/Space.
+function mcNext() {
+  $('mc-next-actions').classList.add('hidden');
+  state.idx++;
+  if (state.idx >= state.cards.length) {
+    finishQuiz();
+  } else {
+    renderCard();
+  }
+}
+
+const mcNextBtn = $('mc-next-btn');
+if (mcNextBtn) {
+  mcNextBtn.addEventListener('click', mcNext);
 }
 
 function renderMCExplanations(options, pickedLabel) {
@@ -408,13 +445,7 @@ async function finishQuiz() {
   showScreen('results');
   renderResults();
 
-  // Session-quiz mode has no Anki cards to schedule — skip /api/finish.
-  if (state.sessionType === 'cluster') {
-    $('schedule-status').textContent = 'ℹ Cluster sessions generate AI questions — no Anki scheduling needed.';
-    return;
-  }
-
-  // Send to backend to schedule.
+  // Send to backend to schedule / persist history.
   try {
     // Capture the questions so the history view can replay the quiz without
     // re-fetching from Anki. Keep the front/back/options/cluster fields.
@@ -426,16 +457,17 @@ async function finishQuiz() {
       options: c.options || null,
       cluster: c.cluster || null,
     }));
+    const deckLabel = state.sessionType === 'cluster' ? 'Notes' : state.deck;
     const payload = state.mode === 'mc'
       ? {
-          deck: state.deck,
+          deck: deckLabel,
           count: state.cards.length,
           mode: 'mc',
           quiz: quizPayload,
           results: state.results.map(({ id, correct, pickedLabel, sessionType }) => ({ id, correct, pickedLabel, sessionType })),
         }
       : {
-          deck: state.deck,
+          deck: deckLabel,
           count: state.cards.length,
           quiz: quizPayload,
           results: state.results.map(({ id, rating }) => ({ id, rating })),
@@ -444,10 +476,16 @@ async function finishQuiz() {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    $('schedule-status').textContent =
-      r.scheduled > 0
-        ? `✓ Rescheduled ${r.scheduled} card(s) in Anki.`
-        : '⚠ No cards were rescheduled.';
+    if (state.sessionType === 'cluster') {
+      $('schedule-status').textContent = r.saved
+        ? '✓ Saved to history. No Anki rescheduling — cluster sessions use AI-generated questions.'
+        : '⚠ Failed to save to history.';
+    } else {
+      $('schedule-status').textContent =
+        r.scheduled > 0
+          ? `✓ Rescheduled ${r.scheduled} card(s) in Anki.`
+          : '⚠ No cards were rescheduled.';
+    }
     if (r.failures && r.failures.length) {
       console.warn('Schedule failures', r.failures);
       $('schedule-status').textContent += ` (${r.failures.length} failures — see console)`;
@@ -563,6 +601,7 @@ function escapeHtml(s) {
 }
 
 $('restart-btn').addEventListener('click', () => {
+  hideLoading();
   $('start-btn').disabled = false;
   $('start-btn').textContent = 'Start quiz';
   // Reset session type to daily for next run
@@ -591,9 +630,12 @@ function endQuiz() {
   $('mc-feedback').textContent = '';
   $('mc-explanations').classList.add('hidden');
   $('mc-explanations').innerHTML = '';
+  $('mc-next-actions').classList.add('hidden');
   const mcOpts = $('mc-options');
   mcOpts.innerHTML = '';
   mcOpts.classList.add('hidden');
+  // Hide loading overlay too in case it's still up.
+  hideLoading();
   // Restore start button so the user can launch a new quiz from setup.
   $('start-btn').disabled = !state.decks.length;
   $('start-btn').textContent = 'Start quiz';
@@ -633,6 +675,13 @@ document.addEventListener('keydown', (e) => {
         return;
       }
     }
+  }
+
+  // MC mode: Space/Enter advances after a pick (mirrors the Next button).
+  if (state.mode === 'mc' && state.mcAnswered && (e.key === ' ' || e.key === 'Enter')) {
+    e.preventDefault();
+    mcNext();
+    return;
   }
 
   // Recall mode: space/enter to reveal

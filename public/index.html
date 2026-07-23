@@ -19,6 +19,15 @@
   </div>
 </header>
 
+<!-- Loading overlay (covers whole page during LLM generation) -->
+<div id="loading-overlay" class="loading-overlay hidden" role="status" aria-live="polite">
+  <div class="loading-card">
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="loading-message" id="loading-message">Loading…</div>
+    <div class="loading-sub muted small" id="loading-sub">This can take up to a minute on a cold cache.</div>
+  </div>
+</div>
+
 <main>
   <!-- SETUP SCREEN -->
   <section id="setup" class="screen active">
@@ -27,15 +36,15 @@
       <label class="session-option">
         <input type="radio" name="session-type" value="daily" checked>
         <span class="session-card">
-          <strong>Daily review</strong>
-          <span class="session-desc">Random cards from your Anki deck.</span>
+          <strong>Flash Cards</strong>
+          <span class="session-desc">Recall or multiple choice from your Anki deck.</span>
         </span>
       </label>
       <label class="session-option">
         <input type="radio" name="session-type" value="cluster">
         <span class="session-card">
-          <strong>Cluster session</strong>
-          <span class="session-desc">AI-generated questions grouped by concept. Requires summary + memory.</span>
+          <strong>Notes</strong>
+          <span class="session-desc">AI-generated questions grouped by concept. Requires Goal + Notes.</span>
         </span>
       </label>
     </div>
@@ -76,11 +85,11 @@
     </div>
 
     <div id="cluster-options" class="hidden">
-      <h2>Summary <span class="muted small">(paste your study notes or topic list)</span></h2>
-      <textarea id="session-summary" rows="4" placeholder="e.g. Docker networking: bridge, host, overlay networks, DNS resolution, container communication…"></textarea>
+      <h2>Goal <span class="muted small">(what you want to learn or be quizzed on)</span></h2>
+      <textarea id="session-goal" rows="4" placeholder="e.g. Docker networking: bridge, host, overlay networks, DNS resolution, container communication…"></textarea>
 
-      <h2>Memory <span class="muted small">(optional context from past sessions)</span></h2>
-      <textarea id="session-memory" rows="3" placeholder="e.g. User struggles with overlay network concepts — revisit with diagrams…"></textarea>
+      <h2>Notes <span class="muted small">(paste study material — slides, transcripts, doc excerpts)</span></h2>
+      <textarea id="session-notes" rows="6" placeholder="e.g. paste your class notes or a transcript; the LLM will generate questions grounded in this material…"></textarea>
     </div>
 
     <div class="actions">
@@ -114,6 +123,10 @@
 
     <div class="mc-options hidden" id="mc-options"></div>
     <div class="mc-explanations hidden" id="mc-explanations"></div>
+
+    <div class="actions hidden" id="mc-next-actions">
+      <button id="mc-next-btn" class="primary" type="button">Next →</button>
+    </div>
 
     <div class="mc-feedback hidden" id="mc-feedback"></div>
 
