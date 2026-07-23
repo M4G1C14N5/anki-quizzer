@@ -20,10 +20,14 @@
 //                               LLM_API_KEY, falls back to distractor-from-backs.
 //   POST /api/session-quiz {goal, notes}
 //        -> { concepts: [{title, background, intuition, quiz:[...5 MCQs]}] }
-//   POST /api/finish {deck, count, mode, results:[...], quiz?:[...]}
+//        (legacy fields `summary`/`memory` are accepted as aliases for `goal`/`notes`)
+//   POST /api/finish {deck, count, mode, sessionType?, results:[...], quiz?:[...], goal?, notes?}
 //        -> schedules via setDueDate + setEaseFactors; returns { saved, scheduled }
-//        Persists the full quiz payload (questions, options, cluster bg) so
+//        Cluster sessions (sessionType:'cluster' OR any synthetic IDs in results)
+//        skip Anki scheduling entirely; everything is still persisted to history.
+//        The full quiz payload (questions, options, cluster bg) is persisted so
 //        the history view can replay the quiz without re-fetching from Anki.
+//        For cluster sessions `goal`/`notes` are persisted to history.
 //   GET  /api/last-results        -> last quiz summary
 //   GET  /api/history             -> { count, history: [...] } (list view, no quiz payload)
 //   GET  /api/history/:index      -> single history entry with full quiz payload
@@ -463,8 +467,19 @@ app.post('/api/quiz', async (req, res, next) => {
 
 app.post('/api/session-quiz', async (req, res, next) => {
   try {
-    const goal = (req.body && req.body.goal) || '';
-    const notes = (req.body && req.body.notes) || '';
+    // Field names: goal + notes. Accept the legacy `summary`/`memory`
+    // aliases as a fallback so older clients keep working while we migrate.
+    const body = req.body || {};
+    let goal = (body.goal != null ? String(body.goal) : '');
+    let notes = (body.notes != null ? String(body.notes) : '');
+    if (!goal && body.summary != null) {
+      console.warn('[session-quiz] legacy field "summary" used; pass "goal" instead');
+      goal = String(body.summary);
+    }
+    if (!notes && body.memory != null) {
+      console.warn('[session-quiz] legacy field "memory" used; pass "notes" instead');
+      notes = String(body.memory);
+    }
     if (!goal.trim() && !notes.trim()) {
       return res.status(400).json({ error: 'goal and notes are both empty' });
     }
@@ -518,10 +533,32 @@ app.post('/api/llm-cache/clear', async (_req, res) => {
 
 app.post('/api/finish', async (req, res, next) => {
   try {
-    const { deck, count, mode, results, quiz } = req.body || {};
+    const body = req.body || {};
+    const { deck, count, mode, results, quiz, sessionType } = body;
+    // Field names: goal + notes. Accept the legacy `summary`/`memory`
+    // aliases as a fallback so older clients keep working while we migrate.
+    let goal = (body.goal != null ? String(body.goal) : '');
+    let notes = (body.notes != null ? String(body.notes) : '');
+    if (!goal && body.summary != null) {
+      console.warn('[finish] legacy field "summary" used; pass "goal" instead');
+      goal = String(body.summary);
+    }
+    if (!notes && body.memory != null) {
+      console.warn('[finish] legacy field "memory" used; pass "notes" instead');
+      notes = String(body.memory);
+    }
     if (!Array.isArray(results) || !results.length) {
       return res.status(400).json({ error: 'results must be a non-empty array' });
     }
+
+    // Determine session type: explicit flag, OR heuristic from results
+    // (any synthetic ID like "session-0" or sessionType:'cluster' on a result).
+    const effectiveSessionType = (() => {
+      if (sessionType === 'cluster') return 'cluster';
+      if (sessionType === 'daily') return 'daily';
+      if (results.some((r) => isSyntheticResult(r))) return 'cluster';
+      return 'daily';
+    })();
 
     let scheduled = 0;
     let skipped = 0;
@@ -597,6 +634,13 @@ app.post('/api/finish', async (req, res, next) => {
       finishedAt: new Date().toISOString(),
       deck: deck || 'All',
       mode: mode === 'mc' ? 'mc' : 'recall',
+      // 'daily' = Anki deck quiz; 'cluster' = LLM-generated session quiz
+      // from goal+notes. Cluster sessions never hit AnkiConnect.
+      sessionType: effectiveSessionType,
+      // For cluster sessions, the original goal/notes are persisted so the
+      // history view can show the prompt that generated the quiz.
+      goal: effectiveSessionType === 'cluster' ? goal : null,
+      notes: effectiveSessionType === 'cluster' ? notes : null,
       requested: count || results.length,
       answered: results.length,
       byRating: results.reduce((acc, r) => {
@@ -615,9 +659,15 @@ app.post('/api/finish', async (req, res, next) => {
           100,
       ),
       scheduled,
+      skipped,
+      skippedReason: skipped
+        ? 'cluster/synthetic session IDs (no real Anki cardId)'
+        : null,
       failures,
       // Persist the full quiz payload (questions, options, cluster background)
       // so the history view can replay the quiz without re-fetching from Anki.
+      // For cluster sessions this is the LLM-generated quiz; for daily sessions
+      // it's the Anki deck cards as shown.
       quiz: Array.isArray(quiz) ? quiz : null,
       results,
     };
@@ -649,6 +699,9 @@ app.get('/api/history', async (_req, res) => {
       finishedAt: e.finishedAt,
       deck: e.deck,
       mode: e.mode,
+      sessionType: e.sessionType || 'daily',
+      hasGoal: typeof e.goal === 'string' && e.goal.length > 0,
+      hasNotes: typeof e.notes === 'string' && e.notes.length > 0,
       requested: e.requested,
       answered: e.answered,
       score: e.score,
