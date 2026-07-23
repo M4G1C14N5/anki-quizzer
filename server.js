@@ -190,7 +190,8 @@ function groupByPrimaryTag(cards) {
 }
 
 // Legacy MC fallback: 3 distractors picked from other cards' backs.
-// Returns labelled options [A,B,C,D] without explanations.
+// Returns shuffled options with labels A..D assigned AFTER the shuffle so the
+// correct answer doesn't always land on label A.
 function legacyMcDistractors(card, pool) {
   const distractors = [];
   const used = new Set([card.id]);
@@ -206,14 +207,16 @@ function legacyMcDistractors(card, pool) {
   while (distractors.length < 3) {
     distractors.push(`(no distractor available ${distractors.length + 1})`);
   }
+  // Build options WITHOUT labels, shuffle, then assign labels A..D by index.
   const opts = [
-    { label: 'A', text: card.back, isCorrect: true },
-    { label: 'B', text: distractors[0], isCorrect: false },
-    { label: 'C', text: distractors[1], isCorrect: false },
-    { label: 'D', text: distractors[2], isCorrect: false },
+    { text: card.back, isCorrect: true },
+    { text: distractors[0], isCorrect: false },
+    { text: distractors[1], isCorrect: false },
+    { text: distractors[2], isCorrect: false },
   ];
   shuffleInPlace(opts);
-  return opts;
+  const labels = ['A', 'B', 'C', 'D'];
+  return opts.map((o, i) => ({ label: labels[i], text: o.text, isCorrect: o.isCorrect }));
 }
 
 // One LLM call for a cluster; caches per sha256(deckName|cardIds|contentHash).
